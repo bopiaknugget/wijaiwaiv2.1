@@ -193,6 +193,8 @@ def main():
         "work_import_open": False,
         "temp_db_path": f"./temp_chroma_db_{uuid.uuid4().hex[:8]}",
         "_notes_store_initialised": False,
+        "ai_edit_undo_stack": [],   # list of editor content snapshots (before AI edits)
+        "ai_edit_redo_stack": [],   # list of editor content snapshots (after undone AI edits)
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -445,6 +447,24 @@ def main():
             load_work_clicked = st.button("📂 Load", type="secondary",
                                           key="load_work_btn", use_container_width=True)
 
+        btn_undo, btn_redo = st.columns([1, 1])
+        with btn_undo:
+            undo_clicked = st.button(
+                "↩️ Undo Editing",
+                key="ai_undo_btn",
+                use_container_width=True,
+                disabled=not st.session_state.ai_edit_undo_stack,
+                help="Undo the last AI edit",
+            )
+        with btn_redo:
+            redo_clicked = st.button(
+                "↪️ Redo Editing",
+                key="ai_redo_btn",
+                use_container_width=True,
+                disabled=not st.session_state.ai_edit_redo_stack,
+                help="Redo the last undone AI edit",
+            )
+
         btn_export, btn_import = st.columns([1, 1])
         with btn_export:
             export_data = (
@@ -500,6 +520,20 @@ def main():
             st.session_state.work_import_open = True
             st.session_state.work_load_select = False
             st.session_state.work_save_dialog = None
+
+        if undo_clicked and st.session_state.ai_edit_undo_stack:
+            st.session_state.ai_edit_redo_stack.append(work_content)
+            restored = st.session_state.ai_edit_undo_stack.pop()
+            st.session_state["_pending_work_content"] = restored
+            st.session_state.work_content_val = restored
+            st.rerun()
+
+        if redo_clicked and st.session_state.ai_edit_redo_stack:
+            st.session_state.ai_edit_undo_stack.append(work_content)
+            restored = st.session_state.ai_edit_redo_stack.pop()
+            st.session_state["_pending_work_content"] = restored
+            st.session_state.work_content_val = restored
+            st.rerun()
 
         # ── Save dialog ────────────────────────────────────────────────────────
         if st.session_state.get("work_save_dialog"):
@@ -614,41 +648,43 @@ def main():
 
         chat_container = st.container(height=480)
         with chat_container:
-            if has_context:
-                for message in st.session_state.messages:
-                    with st.chat_message(message["role"]):
-                        if message["role"] == "assistant":
-                            display_assistant_message(message["content"])
-                            if "tokens" in message:
-                                st.caption(
-                                    f"⏱️ {message['tokens']} tokens "
-                                    f"| ฿{message['cost_thb']:.4f}"
-                                )
-                            if "sources" in message:
-                                with st.expander("📚 Sources"):
-                                    for i, doc in enumerate(message["sources"], 1):
-                                        src_type = doc.metadata.get("source", "doc")
-                                        label = (
-                                            "📝 Note" if src_type == "research_note"
-                                            else f"📄 Doc {i}"
-                                        )
-                                        st.markdown(f"**{label}:**")
-                                        preview = doc.page_content
-                                        st.text(
-                                            preview[:300] + "..."
-                                            if len(preview) > 300 else preview
-                                        )
-                        else:
-                            st.write(message["content"])
-            else:
+            for message in st.session_state.messages:
+                with st.chat_message(message["role"]):
+                    if message["role"] == "assistant":
+                        if message.get("action") == "edit":
+                            st.caption("✏️ แก้ไขเอกสารแล้ว")
+                        display_assistant_message(message["content"])
+                        if "tokens" in message:
+                            st.caption(
+                                f"⏱️ {message['tokens']} tokens "
+                                f"| ฿{message['cost_thb']:.4f}"
+                            )
+                        if "sources" in message:
+                            with st.expander("📚 Sources"):
+                                for i, doc in enumerate(message["sources"], 1):
+                                    src_type = doc.metadata.get("source", "doc")
+                                    label = (
+                                        "📝 Note" if src_type == "research_note"
+                                        else f"📄 Doc {i}"
+                                    )
+                                    st.markdown(f"**{label}:**")
+                                    preview = doc.page_content
+                                    st.text(
+                                        preview[:300] + "..."
+                                        if len(preview) > 300 else preview
+                                    )
+                    else:
+                        st.write(message["content"])
+            if not st.session_state.messages and not has_context:
                 st.info(
-                    "📄 Upload and process documents **or** save a research note "
-                    "in the sidebar to start chatting."
+                    "📄 Upload documents or save a note for RAG-based answers. "
+                    "You can also give edit commands directly (e.g. 'สร้าง template วิจัย')."
                 )
 
         # Chat input
         prompt = st.chat_input(
-            "Ask about your documents and notes...", key="chat_input_main"
+            "Ask a question or give an edit command (e.g. 'แก้ไขงานนี้ให้กะทัดรัดขึ้น')...",
+            key="chat_input_main",
         )
 
         # ── Clear Chat button — below the chat input ───────────────────────
@@ -660,43 +696,58 @@ def main():
             st.rerun()
 
         if prompt:
-            if has_context:
-                st.session_state.messages.append({"role": "user", "content": prompt})
+            st.session_state.messages.append({"role": "user", "content": prompt})
 
-                with st.spinner("Analyzing..."):
-                    try:
-                        chat_history = st.session_state.messages[:-1]
+            with st.spinner("Analyzing..."):
+                try:
+                    chat_history = st.session_state.messages[:-1]
 
-                        # Merge MMR results from both stores
+                    # Retrieve from whichever stores are loaded (empty list if none)
+                    if doc_store is not None or note_store is not None:
                         retrieved_docs = retrieve_from_both_stores(
                             doc_store, note_store, prompt, k=3
                         )
+                    else:
+                        retrieved_docs = []
 
-                        answer, input_tokens, output_tokens = generate_answer(
-                            prompt, retrieved_docs, chat_history
+                    action, response_text, new_editor_content, input_tokens, output_tokens = (
+                        generate_answer(
+                            prompt, retrieved_docs, chat_history,
+                            editor_content=work_content,
                         )
+                    )
 
-                        total_tokens_turn = input_tokens + output_tokens
-                        cost_thb = (total_tokens_turn / 1_000_000) * 0.4 * 35
+                    total_tokens_turn = input_tokens + output_tokens
+                    cost_thb = (total_tokens_turn / 1_000_000) * 0.4 * 35
 
-                        st.session_state.total_tokens += total_tokens_turn
-                        st.session_state.total_cost_thb += cost_thb
+                    st.session_state.total_tokens += total_tokens_turn
+                    st.session_state.total_cost_thb += cost_thb
 
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": answer,
-                            "sources": retrieved_docs,
-                            "tokens": total_tokens_turn,
-                            "cost_thb": cost_thb
-                        })
-                    except Exception as e:
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": f"❌ Error: {str(e)}"
-                        })
-                st.rerun()
-            else:
-                st.warning("📄 Please process documents or save a note first.")
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": response_text,
+                        "sources": retrieved_docs,
+                        "tokens": total_tokens_turn,
+                        "cost_thb": cost_thb,
+                        "action": action,
+                    })
+
+                    # Push new content into the editor when the AI performs an edit
+                    if action == "edit" and new_editor_content:
+                        # Snapshot current content for undo (cap stack at 20)
+                        st.session_state.ai_edit_undo_stack.append(work_content)
+                        if len(st.session_state.ai_edit_undo_stack) > 20:
+                            st.session_state.ai_edit_undo_stack.pop(0)
+                        st.session_state.ai_edit_redo_stack = []
+                        st.session_state["_pending_work_content"] = new_editor_content
+                        st.session_state.work_content_val = new_editor_content
+
+                except Exception as e:
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": f"❌ Error: {str(e)}"
+                    })
+            st.rerun()
 
 
 if __name__ == "__main__":

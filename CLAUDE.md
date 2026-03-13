@@ -41,9 +41,11 @@ Two entry points exist for the same underlying pipeline:
 
 ### Data flow (query path)
 
+In **app.py** (web UI):
 ```
 User question
-  → retrieve_similar_documents() [vector_store.py, ChromaDB similarity search]
+  → retrieve_from_both_stores() [vector_store.py]
+      → merges results from session doc store + persistent notes store (deduplicates by content)
   → generate_answer(query, retrieved_docs, chat_history) [generator.py]
       → optional: re-phrase query via API if chat_history exists
       → _call_api() → POST to OpenThaiGPT API
@@ -51,6 +53,8 @@ User question
       → splits <think>...</think> from the answer text
       → think shown in collapsible expander; answer shown normally
 ```
+
+In **main.py** (CLI), only one ChromaDB is used, so `retrieve_mmr()` is called directly (MMR with `lambda_mult=0.6`).
 
 ### Module responsibilities
 
@@ -60,7 +64,7 @@ User question
 | `generator.py` | OpenThaiGPT API calls, chat-history-based query re-phrasing |
 | `vector_store.py` | HuggingFace embeddings (local, no API key), ChromaDB lifecycle |
 | `document_loader.py` | PDF/TXT/DOCX loading, text chunking (1000 chars, 200 overlap) |
-| `database.py` | SQLite CRUD for research notes (`research_notes.db`) |
+| `database.py` | SQLite CRUD for research notes and document metadata (`research_notes.db`) |
 | `main.py` | CLI wrapper around the same pipeline modules |
 | `rag_pipeline.py` | **Legacy Phase 1 reference only — do not use or extend** (uses deprecated `langchain.document_loaders` imports) |
 

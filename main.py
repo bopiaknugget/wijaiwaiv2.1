@@ -98,7 +98,7 @@ def query_mode(query_text: str, db_path: str = "./chroma_db", k: int = 3):
         print_retrieval_results(query_text, retrieved_docs)
 
         print("\n[3/3] Generating AI answer...")
-        answer, input_tokens, output_tokens = generate_answer(
+        _action, answer, _new_editor, input_tokens, output_tokens = generate_answer(
             query_text, retrieved_docs, chat_history=[]
         )
         print_generated_answer(query_text, answer)
