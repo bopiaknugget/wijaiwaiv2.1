@@ -1,309 +1,219 @@
 """
-RAG Pipeline Phase 1: Document Ingestion, Embedding, and Retrieval
-This module handles loading PDFs, chunking text, creating embeddings,
-and storing them in a local ChromaDB vector store.
+RAG Pipeline — Legacy Phase 1 Reference
+----------------------------------------
+This file is kept as a standalone reference implementation.
+For production use, see main.py (CLI) or app.py (Streamlit UI).
+
+Fixed in this version:
+- Replaced deprecated `langchain.document_loaders` with `langchain_community.document_loaders`
+- Replaced deprecated `langchain.text_splitter` with `langchain_text_splitters`
+- Replaced Google Gemini embeddings with local HuggingFace embeddings (no API key needed)
+- Removed deprecated `vector_store.persist()` call (Chroma v0.4+ auto-persists)
 """
 
 import os
 import sys
-from dotenv import load_dotenv
-from langchain.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 
 
 # ============================================================================
-# 1. ENVIRONMENT SETUP
+# 1. DOCUMENT LOADING
 # ============================================================================
 
-def load_environment():
-    """
-    Load environment variables from .env file.
-    Ensures GOOGLE_API_KEY is available for Gemini API access.
-    
-    Returns:
-        str: The Google API key
-        
-    Raises:
-        ValueError: If GOOGLE_API_KEY is not found in environment
-    """
-    # Load environment variables from .env file
-    load_dotenv()
-    
-    # Retrieve the Google API key
-    api_key = os.getenv("GOOGLE_API_KEY")
-    
-    # Error handling: Check if API key exists
-    if not api_key:
-        raise ValueError(
-            "❌ GOOGLE_API_KEY not found. Please ensure:\n"
-            "  1. You have a .env file in the current directory\n"
-            "  2. GOOGLE_API_KEY=your_key_here is set in the .env file\n"
-            "  3. You've obtained your API key from: https://ai.google.dev/"
-        )
-    
-    print("✓ Environment loaded successfully")
-    return api_key
-
-
-# ============================================================================
-# 2. DOCUMENT LOADING
-# ============================================================================
-
-def load_pdf_document(pdf_path):
+def load_pdf_document(pdf_path: str) -> list:
     """
     Load a PDF document using PyPDFLoader.
-    
+
     Args:
-        pdf_path (str): Path to the PDF file
-        
+        pdf_path: Path to the PDF file
+
     Returns:
-        list: List of Document objects from the PDF
-        
+        list[Document]: One Document per page
+
     Raises:
-        FileNotFoundError: If the PDF file doesn't exist
-        Exception: If PDF loading fails
+        FileNotFoundError: If the file does not exist
+        Exception: If loading fails
     """
-    # Check if PDF file exists
     if not os.path.exists(pdf_path):
         raise FileNotFoundError(
-            f"❌ PDF file not found at: {pdf_path}\n"
-            f"Please ensure the file exists in your working directory."
+            f"❌ PDF not found: {pdf_path}\n"
+            "Please check the file path and try again."
         )
-    
     try:
-        # Initialize PyPDFLoader with the PDF path
         loader = PyPDFLoader(pdf_path)
-        
-        # Load all pages as documents
         documents = loader.load()
-        
-        print(f"✓ Successfully loaded PDF: {pdf_path}")
-        print(f"✓ Total pages loaded: {len(documents)}")
-        
+        print(f"✓ Loaded PDF: {pdf_path} ({len(documents)} pages)")
         return documents
-    
     except Exception as e:
         raise Exception(f"❌ Error loading PDF: {str(e)}")
 
 
 # ============================================================================
-# 3. TEXT CHUNKING
+# 2. TEXT CHUNKING
 # ============================================================================
 
-def chunk_documents(documents, chunk_size=1000, chunk_overlap=200):
+def chunk_documents(documents: list, chunk_size: int = 1000,
+                    chunk_overlap: int = 200) -> list:
     """
-    Split documents into overlapping chunks for better embedding context.
-    Uses RecursiveCharacterTextSplitter to maintain semantic coherence.
-    
+    Split documents into overlapping chunks using RecursiveCharacterTextSplitter.
+
     Args:
-        documents (list): List of Document objects
-        chunk_size (int): Maximum characters per chunk (default: 1000)
-        chunk_overlap (int): Characters to overlap between chunks (default: 200)
-        
+        documents: List of Document objects
+        chunk_size: Maximum characters per chunk (default 1000)
+        chunk_overlap: Overlap between consecutive chunks (default 200)
+
     Returns:
-        list: List of chunked Document objects
+        list[Document]: Chunked documents
     """
-    # Initialize the text splitter with specified parameters
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,           # Maximum chunk size
-        chunk_overlap=chunk_overlap,     # Overlap for context continuity
-        separators=["\n\n", "\n", " ", ""]  # Split on sentences first, then words
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", " ", ""]
     )
-    
-    # Split documents into chunks
-    chunked_documents = text_splitter.split_documents(documents)
-    
-    print(f"✓ Document chunking completed")
-    print(f"✓ Total chunks created: {len(chunked_documents)}")
-    print(f"✓ Chunk size: {chunk_size} | Overlap: {chunk_overlap}")
-    
-    return chunked_documents
+    chunks = splitter.split_documents(documents)
+    print(f"✓ Chunking complete: {len(chunks)} chunks "
+          f"(size={chunk_size}, overlap={chunk_overlap})")
+    return chunks
 
 
 # ============================================================================
-# 4. EMBEDDING SETUP
+# 3. EMBEDDINGS
 # ============================================================================
 
-def initialize_embeddings():
+def initialize_embeddings() -> HuggingFaceEmbeddings:
     """
-    Initialize Google Generative AI embeddings using Gemini's text-embedding-004 model.
-    This creates embeddings for both documents and queries.
-    
+    Initialize a local multilingual HuggingFace embedding model.
+    Supports Thai and many other languages. Requires no API key.
+
     Returns:
-        GoogleGenerativeAIEmbeddings: Initialized embedding model
-        
-    Raises:
-        ValueError: If API key is invalid or embedding initialization fails
+        HuggingFaceEmbeddings: Initialized embedding model
     """
     try:
-        # Initialize GoogleGenerativeAIEmbeddings with text-embedding-004 model
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/text-embedding-004"  # Latest Google Gemini embedding model
+        embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
         )
-        
-        print("✓ GoogleGenerativeAIEmbeddings initialized (text-embedding-004)")
-        
+        print("✓ HuggingFaceEmbeddings initialized")
         return embeddings
-    
     except Exception as e:
         raise ValueError(f"❌ Error initializing embeddings: {str(e)}")
 
 
 # ============================================================================
-# 5. VECTOR STORE SETUP
+# 4. VECTOR STORE
 # ============================================================================
 
-def create_vector_store(chunked_documents, embeddings, db_path="./chroma_db"):
+def create_vector_store(chunked_documents: list, embeddings,
+                        db_path: str = "./chroma_db") -> Chroma:
     """
-    Create and persist a ChromaDB vector store with embedded documents.
-    This allows for efficient similarity-based retrieval later.
-    
+    Create a ChromaDB vector store from chunked documents.
+    Chroma v0.4+ auto-persists to disk — no manual .persist() call needed.
+
     Args:
-        chunked_documents (list): List of chunked Document objects
+        chunked_documents: Pre-chunked Document list
         embeddings: Initialized embedding model
-        db_path (str): Path where ChromaDB will be persisted (default: ./chroma_db)
-        
+        db_path: Directory path for ChromaDB storage
+
     Returns:
-        Chroma: Initialized and populated Chroma vector store
-        
-    Raises:
-        Exception: If vector store creation or persistence fails
+        Chroma: Populated vector store
     """
     try:
-        # Create Chroma vector store with embeddings and documents
-        # persist_directory ensures the DB is saved locally for future use
         vector_store = Chroma.from_documents(
-            documents=chunked_documents,        # Chunked documents to embed and store
-            embedding=embeddings,               # Embedding function (Gemini)
-            persist_directory=db_path,          # Local storage path
-            collection_name="documents"         # Collection name for organization
+            documents=chunked_documents,
+            embedding=embeddings,
+            persist_directory=db_path,
+            collection_name="documents"
         )
-        
-        # Persist the vector store to disk
-        vector_store.persist()
-        
-        print(f"✓ ChromaDB vector store created successfully")
-        print(f"✓ Database persisted at: {os.path.abspath(db_path)}")
-        print(f"✓ Total documents in store: {len(chunked_documents)}")
-        
+        print(f"✓ ChromaDB created at {os.path.abspath(db_path)} "
+              f"({len(chunked_documents)} chunks)")
         return vector_store
-    
     except Exception as e:
         raise Exception(f"❌ Error creating vector store: {str(e)}")
 
 
 # ============================================================================
-# 6. RETRIEVAL TESTING
+# 5. RETRIEVAL
 # ============================================================================
 
-def retrieve_similar_documents(vector_store, query, k=3):
+def retrieve_similar_documents(vector_store: Chroma, query: str,
+                                k: int = 3) -> list:
     """
-    Retrieve the top k most similar documents from the vector store
-    based on a similarity search with the query.
-    
+    Perform similarity search against the vector store.
+
     Args:
-        vector_store (Chroma): The Chroma vector store
-        query (str): The search query
-        k (int): Number of top results to retrieve (default: 3)
-        
+        vector_store: Chroma instance
+        query: Search query string
+        k: Number of results to return
+
     Returns:
-        list: List of retrieved Document objects
+        list[Document]: Top-k most similar documents
     """
     try:
-        # Perform similarity search on the vector store
-        results = vector_store.similarity_search(query, k=k)
-        
-        return results
-    
+        return vector_store.similarity_search(query, k=k)
     except Exception as e:
-        raise Exception(f"❌ Error during retrieval: {str(e)}")
+        raise Exception(f"❌ Retrieval error: {str(e)}")
 
 
-def print_retrieval_results(query, results):
-    """
-    Pretty-print the retrieved documents with formatting.
-    
-    Args:
-        query (str): The original search query
-        results (list): List of retrieved Document objects
-    """
-    print("\n" + "="*80)
-    print(f"📋 RETRIEVAL TEST RESULTS")
-    print("="*80)
+def print_retrieval_results(query: str, results: list):
+    """Pretty-print retrieval results."""
+    print("\n" + "=" * 80)
+    print("📋 RETRIEVAL TEST RESULTS")
+    print("=" * 80)
     print(f"Query: '{query}'")
     print(f"Retrieved: {len(results)} documents\n")
-    
+
     for i, doc in enumerate(results, 1):
         print(f"\n--- Document {i} ---")
-        print(f"Content:\n{doc.page_content[:500]}...")  # Print first 500 chars
+        print(f"Content:\n{doc.page_content[:500]}...")
         if "source" in doc.metadata:
             print(f"Source: {doc.metadata['source']}")
         if "page" in doc.metadata:
             print(f"Page: {doc.metadata['page']}")
-    
-    print("\n" + "="*80)
+
+    print("\n" + "=" * 80)
 
 
 # ============================================================================
-# 7. MAIN PIPELINE EXECUTION
+# 6. MAIN PIPELINE (standalone execution)
 # ============================================================================
 
 def main():
     """
-    Main function that orchestrates the entire RAG pipeline.
-    Executes all steps: environment setup, document loading,
-    chunking, embedding, vector store creation, and retrieval testing.
+    Full pipeline: load → chunk → embed → store → retrieve.
+    Edit pdf_path and test_query below before running.
     """
-    
-    print("\n" + "="*80)
-    print("🚀 RAG PIPELINE - PHASE 1: INGESTION & RETRIEVAL")
-    print("="*80 + "\n")
-    
+    print("\n" + "=" * 80)
+    print("🚀 RAG PIPELINE — PHASE 1 (Legacy Reference)")
+    print("=" * 80 + "\n")
+
+    # ── Configuration ──────────────────────────────────────────────────────────
+    pdf_path = "data/paper.pdf"          # ← edit as needed
+    db_path = "./chroma_db"
+    test_query = "What is the main topic of this document?"
+
     try:
-        # Step 1: Load environment variables and API key
-        print("[1/6] Loading environment configuration...")
-        api_key = load_environment()
-        
-        # Step 2: Load PDF document
-        print("\n[2/6] Loading PDF document...")
-        pdf_path = "hesse_philosophy_analysis.pdf"  # Sample PDF file name
+        print("[1/5] Loading PDF...")
         documents = load_pdf_document(pdf_path)
-        
-        # Step 3: Chunk documents for better semantic processing
-        print("\n[3/6] Chunking documents...")
-        chunked_documents = chunk_documents(
-            documents,
-            chunk_size=1000,        # Maximum characters per chunk
-            chunk_overlap=200       # Overlap for context continuity
-        )
-        
-        # Step 4: Initialize embedding model
-        print("\n[4/6] Initializing embeddings...")
+
+        print("\n[2/5] Chunking...")
+        chunks = chunk_documents(documents, chunk_size=1000, chunk_overlap=200)
+
+        print("\n[3/5] Initializing embeddings...")
         embeddings = initialize_embeddings()
-        
-        # Step 5: Create and persist vector store
-        print("\n[5/6] Creating and persisting vector store...")
-        vector_store = create_vector_store(chunked_documents, embeddings)
-        
-        # Step 6: Test retrieval with sample query
-        print("\n[6/6] Testing retrieval system...")
-        
-        # Define a hardcoded test query
-        test_query = "What is the philosophical significance of consciousness?"
-        
-        # Retrieve similar documents
-        retrieved_docs = retrieve_similar_documents(vector_store, test_query, k=3)
-        
-        # Display results
-        print_retrieval_results(test_query, retrieved_docs)
-        
-        print("\n✅ RAG Pipeline Phase 1 completed successfully!")
-        print("📌 Vector store is now ready for production use.\n")
-        
+
+        print("\n[4/5] Creating vector store...")
+        vector_store = create_vector_store(chunks, embeddings, db_path)
+
+        print("\n[5/5] Testing retrieval...")
+        results = retrieve_similar_documents(vector_store, test_query, k=3)
+        print_retrieval_results(test_query, results)
+
+        print("\n✅ Legacy pipeline completed successfully.")
         return vector_store
-    
+
     except FileNotFoundError as e:
         print(f"\n{e}")
         sys.exit(1)
@@ -315,13 +225,5 @@ def main():
         sys.exit(1)
 
 
-# ============================================================================
-# ENTRY POINT
-# ============================================================================
-
 if __name__ == "__main__":
-    # Run the main pipeline
-    vector_store = main()
-    
-    # The vector_store is now ready for use in subsequent phases
-    # (e.g., Phase 2: LLM integration for Q&A)
+    main()
