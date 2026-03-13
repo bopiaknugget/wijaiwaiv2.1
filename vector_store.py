@@ -100,25 +100,26 @@ def get_or_create_vector_store(db_path="./chroma_db", chunked_documents=None, em
             return vector_store
         
         else:
-            # Database doesn't exist - need documents to create it
-            if chunked_documents is None:
-                raise ValueError(
-                    f"❌ ChromaDB not found at {db_path}\n"
-                    f"Please provide chunked_documents to create a new database\n"
-                    f"Use: --ingest flag to create the database from a PDF"
+            # Database doesn't exist
+            if not chunked_documents:  # handles both None and empty list []
+                print(f"✓ No documents provided. Initializing empty ChromaDB at: {os.path.abspath(db_path)}")
+                vector_store = Chroma(
+                    persist_directory=db_path,
+                    embedding_function=embeddings,
+                    collection_name="documents"
                 )
-            
-            print(f"✓ Creating new ChromaDB at: {os.path.abspath(db_path)}")
-            print(f"✓ Embedding {len(chunked_documents)} chunks with Google Gemini...")
-            
-            # Create new ChromaDB from documents
-            # Chroma automatically persists to persist_directory in v0.4.x+
-            vector_store = Chroma.from_documents(
-                documents=chunked_documents,        # Chunked documents to embed and store
-                embedding=embeddings,               # Embedding function (Gemini)
-                persist_directory=db_path,          # Local storage path - enables auto-persist
-                collection_name="documents"         # Collection name for organization
-            )
+            else:
+                print(f"✓ Creating new ChromaDB at: {os.path.abspath(db_path)}")
+                print(f"✓ Embedding {len(chunked_documents)} chunks...")
+
+                # Create new ChromaDB from documents
+                # Chroma automatically persists to persist_directory in v0.4.x+
+                vector_store = Chroma.from_documents(
+                    documents=chunked_documents,        # Chunked documents to embed and store
+                    embedding=embeddings,               # Embedding function
+                    persist_directory=db_path,          # Local storage path - enables auto-persist
+                    collection_name="documents"         # Collection name for organization
+                )
             
             # NOTE: Do NOT call vector_store.persist() - Chroma v0.4.x+ auto-persists
             # Calling persist() is deprecated and unnecessary
