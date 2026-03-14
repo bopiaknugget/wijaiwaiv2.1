@@ -1,12 +1,12 @@
 """
 Research Workbench — AI-Powered RAG with Text Notes
-3-panel layout: Sidebar (Docs + Notes) | Center (Your Work editor) | Right (Assistant chat)
+3-panel layout: Sidebar (Docs + Notes) | Center (Research Workbench) | Right (Assistant chat)
 
 Key improvements in this version:
-- Separate vector stores: doc_vector_store (session) and note_vector_store (persistent)
-- Delete buttons for Notes (SQLite + ChromaDB removal)
-- Smaller chunk size for notes (300/50) for precise retrieval
-- MMR-based merged retrieval from both stores for accurate, diverse context
+- Unified single ChromaDB collection separated by metadata (source_type)
+- Advanced RAG: rich metadata, parent-child chunking, summary embeddings
+- Adaptive chunk sizing based on content length
+- MMR-based retrieval with parent expansion for full-context answers
 - @st.cache_resource on embeddings; @st.cache_data on note loading
 """
 
@@ -22,18 +22,25 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 import database
-from document_loader import load_document, chunk_documents
+from document_loader import (
+    load_document, chunk_documents,
+    enrich_metadata, create_parent_child_chunks, create_summary_documents,
+)
 from generator import generate_answer, generate_selection_edit
 from vector_store import (
     initialize_embeddings,
     get_or_create_vector_store,
+    ingest_documents,
+    ingest_note,
+    retrieve_unified,
     retrieve_from_both_stores,
+    UNIFIED_DB_PATH,
+    UNIFIED_COLLECTION,
 )
 
 
 _THINK_PATTERN = re.compile(r'<think>(.*?)</think>', re.DOTALL)
 WORK_DIR = os.path.join(os.path.dirname(__file__), "your_work")
-NOTES_DB_PATH = "./notes_chroma_db"
 
 
 # ── File helpers ───────────────────────────────────────────────────────────────
@@ -100,43 +107,16 @@ def display_assistant_message(content: str):
     st.write(answer)
 
 
-# ── Note vector-store helpers ──────────────────────────────────────────────────
+# ── Unified vector-store helpers ──────────────────────────────────────────────
 
-def _load_note_vector_store(embeddings):
-    """Load (or initialise) the persistent notes ChromaDB."""
+def _load_unified_vector_store(embeddings):
+    """Load (or initialise) the persistent unified ChromaDB."""
     return get_or_create_vector_store(
-        db_path=NOTES_DB_PATH,
+        db_path=UNIFIED_DB_PATH,
         chunked_documents=None,
         embeddings=embeddings,
-        collection_name="documents"
+        collection_name=UNIFIED_COLLECTION,
     )
-
-
-def _embed_note(note_id: int, title: str, content: str,
-                embeddings, note_store):
-    """Chunk a note with small chunks and add to note_vector_store."""
-    doc = Document(
-        page_content=content,
-        metadata={"title": title, "source": "research_note", "note_id": note_id}
-    )
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=300, chunk_overlap=50,
-        separators=["\n\n", "\n", " ", ""]
-    )
-    chunks = splitter.split_documents([doc])
-
-    # Ensure note_store exists
-    if note_store is None:
-        note_store = get_or_create_vector_store(
-            db_path=NOTES_DB_PATH,
-            chunked_documents=chunks,
-            embeddings=embeddings,
-            collection_name="documents"
-        )
-    else:
-        note_store.add_documents(chunks)
-
-    return note_store
 
 
 # ============================================================================
@@ -152,8 +132,7 @@ def main():
 
     # ── Session state defaults ─────────────────────────────────────────────────
     defaults = {
-        "doc_vector_store": None,       # Session-scoped: uploaded documents
-        "note_vector_store": None,      # Persistent: research notes
+        "unified_vector_store": None,   # Single unified ChromaDB for docs + notes
         "processed_docs": [],           # [{"name": str, "chunks": int}]
         "messages": [],
         "total_tokens": 0,
@@ -167,8 +146,7 @@ def main():
         "work_save_dialog": None,
         "work_save_dialog_name": "",
         "work_import_open": False,
-        "temp_db_path": f"./temp_chroma_db_{uuid.uuid4().hex[:8]}",
-        "_notes_store_initialised": False,
+        "_unified_store_initialised": False,
         "_app_initialized": False,
         "_research_mode": False,
         "ai_edit_undo_stack": [],   # list of editor content snapshots (before AI edits)
@@ -282,16 +260,16 @@ def main():
             embeddings = initialize_embeddings()
             progress.progress(60, text="✅ โหลด Embedding Model สำเร็จ")
 
-            # Step 2: Load notes vector store
-            progress.progress(70, text="📝 กำลังโหลดฐานข้อมูลโน้ต...")
-            if not st.session_state._notes_store_initialised:
-                if os.path.exists(NOTES_DB_PATH):
+            # Step 2: Load unified vector store
+            progress.progress(70, text="📝 กำลังโหลดฐานข้อมูล Vector Store...")
+            if not st.session_state._unified_store_initialised:
+                if os.path.exists(UNIFIED_DB_PATH):
                     try:
-                        st.session_state.note_vector_store = _load_note_vector_store(embeddings)
+                        st.session_state.unified_vector_store = _load_unified_vector_store(embeddings)
                     except Exception:
-                        st.session_state.note_vector_store = None
-                st.session_state._notes_store_initialised = True
-            progress.progress(90, text="✅ โหลดฐานข้อมูลโน้ตสำเร็จ")
+                        st.session_state.unified_vector_store = None
+                st.session_state._unified_store_initialised = True
+            progress.progress(90, text="✅ โหลดฐานข้อมูล Vector Store สำเร็จ")
 
             # Step 3: Finalize
             progress.progress(100, text="✅ พร้อมใช้งาน!")
@@ -372,13 +350,6 @@ def main():
     # SIDEBAR — Documents + Notes tabs
     # ============================================================================
     with st.sidebar:
-        st.markdown("""
-        <div style="
-            font-size: 1.35rem; font-weight: 700;
-            padding: 0.25rem 0 0.6rem 0;
-            color: #1f2937;
-        ">🔬 Research Workbench</div>
-        """, unsafe_allow_html=True)
         sidebar_tab_docs, sidebar_tab_notes = st.tabs(["📄 Documents", "📝 Notes"])
 
         # ── Tab 1: Documents ──────────────────────────────────────────────────
@@ -395,10 +366,12 @@ def main():
                 st.caption(f"{len(uploaded_files)} file(s) selected")
                 if st.button("🔄 Process Documents", type="primary",
                              key="process_doc_btn", use_container_width=True):
-                    all_chunks = []
+                    all_child_chunks = []
+                    all_parent_records = []
+                    all_summary_docs = []
                     new_doc_entries = []
 
-                    with st.spinner(f"Processing {len(uploaded_files)} file(s)..."):
+                    with st.spinner(f"Processing {len(uploaded_files)} file(s) with Advanced RAG..."):
                         for uploaded_file in uploaded_files:
                             try:
                                 ext = os.path.splitext(uploaded_file.name)[1].lower()
@@ -408,49 +381,60 @@ def main():
                                     tmp_file.write(uploaded_file.getvalue())
                                     tmp_path = tmp_file.name
 
+                                # Load and enrich with rich metadata
                                 documents = load_document(tmp_path)
-                                chunks = chunk_documents(
-                                    documents, chunk_size=1000, chunk_overlap=200
+                                documents = enrich_metadata(
+                                    documents, uploaded_file.name,
+                                    source_type="document"
                                 )
-                                # Tag every chunk with the original filename
-                                for chunk in chunks:
-                                    chunk.metadata["doc_name"] = uploaded_file.name
-                                all_chunks.extend(chunks)
+
+                                # Parent-Child Chunking (adaptive sizing)
+                                child_chunks, parent_records = create_parent_child_chunks(
+                                    documents, uploaded_file.name,
+                                    source_type="document"
+                                )
+
+                                # Summary Embedding (extractive fallback)
+                                summary_docs = create_summary_documents(
+                                    documents, uploaded_file.name
+                                )
+
+                                all_child_chunks.extend(child_chunks)
+                                all_parent_records.extend(parent_records)
+                                all_summary_docs.extend(summary_docs)
                                 new_doc_entries.append({
                                     "name": uploaded_file.name,
-                                    "chunks": len(chunks)
+                                    "chunks": len(child_chunks)
                                 })
                                 os.unlink(tmp_path)
                             except Exception as e:
                                 st.error(f"❌ {uploaded_file.name}: {str(e)}")
 
-                        if all_chunks:
+                        if all_child_chunks:
                             try:
-                                # Clean up old temp DB
-                                old_db_path = st.session_state.temp_db_path
-                                st.session_state.doc_vector_store = None
-                                gc.collect()
-                                try:
-                                    if os.path.exists(old_db_path):
-                                        shutil.rmtree(old_db_path)
-                                except OSError:
-                                    pass
+                                # Ensure unified store exists
+                                if st.session_state.unified_vector_store is None:
+                                    st.session_state.unified_vector_store = get_or_create_vector_store(
+                                        db_path=UNIFIED_DB_PATH,
+                                        embeddings=embeddings,
+                                        collection_name=UNIFIED_COLLECTION,
+                                    )
 
-                                new_db_path = f"./temp_chroma_db_{uuid.uuid4().hex[:8]}"
-                                st.session_state.temp_db_path = new_db_path
-
-                                st.session_state.doc_vector_store = get_or_create_vector_store(
-                                    db_path=new_db_path,
-                                    chunked_documents=all_chunks,
-                                    embeddings=embeddings
+                                # Ingest everything into unified collection
+                                ingest_documents(
+                                    st.session_state.unified_vector_store,
+                                    all_child_chunks,
+                                    all_parent_records,
+                                    all_summary_docs,
                                 )
-                                st.session_state.processed_docs = new_doc_entries
+
+                                st.session_state.processed_docs.extend(new_doc_entries)
                                 st.session_state.messages = []
                                 st.session_state.total_tokens = 0
                                 st.session_state.total_cost_thb = 0.0
                                 st.success(
                                     f"✅ {len(new_doc_entries)}/{len(uploaded_files)} "
-                                    "file(s) ready!"
+                                    "file(s) ready! (Advanced RAG)"
                                 )
                             except Exception as e:
                                 st.error(f"❌ Vector store error: {str(e)}")
@@ -467,23 +451,22 @@ def main():
                     with col_del:
                         if st.button("🗑️", key=f"del_doc_{doc_entry['name']}",
                                      help="Delete this document"):
-                            # Remove chunks from ChromaDB by doc_name metadata
-                            if st.session_state.doc_vector_store is not None:
+                            # Remove chunks from unified ChromaDB by doc_name metadata
+                            if st.session_state.unified_vector_store is not None:
                                 try:
-                                    st.session_state.doc_vector_store \
+                                    st.session_state.unified_vector_store \
                                         ._collection.delete(
                                             where={"doc_name": doc_entry["name"]}
                                         )
                                 except Exception as e:
                                     st.error(f"VectorDB delete error: {e}")
+                            # Remove parent chunks from SQLite
+                            database.delete_parent_chunks_by_source(doc_entry["name"])
                             # Remove from tracking list immediately
                             st.session_state.processed_docs = [
                                 d for d in st.session_state.processed_docs
                                 if d["name"] != doc_entry["name"]
                             ]
-                            # If no docs remain, clear the store entirely
-                            if not st.session_state.processed_docs:
-                                st.session_state.doc_vector_store = None
                             st.rerun()
 
         # ── Tab 2: Notes ──────────────────────────────────────────────────────
@@ -512,10 +495,11 @@ def main():
                         note_id = database.save_note(
                             note_title_input, note_content_input
                         )
-                        # Embed into the dedicated note store with small chunks
-                        st.session_state.note_vector_store = _embed_note(
+                        # Embed into the unified collection with source_type='note'
+                        st.session_state.unified_vector_store = ingest_note(
+                            st.session_state.unified_vector_store,
                             note_id, note_title_input, note_content_input,
-                            embeddings, st.session_state.note_vector_store
+                            embeddings,
                         )
                     st.success(f"✅ Saved '{note_title_input}' (ID: {note_id})")
                     st.session_state.note_title_val = ""
@@ -540,10 +524,10 @@ def main():
                                      help="Delete this note"):
                             # 1. Remove from SQLite
                             database.delete_note_by_id(note['id'])
-                            # 2. Remove from ChromaDB note store
-                            if st.session_state.note_vector_store is not None:
+                            # 2. Remove from unified ChromaDB
+                            if st.session_state.unified_vector_store is not None:
                                 try:
-                                    st.session_state.note_vector_store \
+                                    st.session_state.unified_vector_store \
                                         ._collection.delete(
                                             where={"note_id": note['id']}
                                         )
@@ -564,27 +548,27 @@ def main():
 
 
     # ============================================================================
-    # MAIN CONTENT: Center (Your Work) | Right (Assistant)
+    # MAIN CONTENT: Center (Research Workbench) | Right (Assistant)
     # ============================================================================
     col_center, col_right = st.columns([3, 2], gap="large")
 
-    # ── Center: Your Work ─────────────────────────────────────────────────────
+    # ── Center: Research Workbench ─────────────────────────────────────────────────────
     with col_center:
         st.markdown("""
         <div style="font-size:1.35rem;font-weight:700;color:#1f2937;padding:0.25rem 0 0.4rem 0;">
-            ✍️ Your Work
+            🔬 Research Workbench
         </div>""", unsafe_allow_html=True)
 
         work_title = st.text_input(
             "Title",
             value=st.session_state.work_title_val,
-            placeholder="Enter a title for your work...",
+            placeholder="Enter a title for your research...",
             key="work_title_input"
         )
         work_content = st.text_area(
             "Content",
             value=st.session_state.work_content_val,
-            placeholder="Start writing your work here...",
+            placeholder="Start writing your research here...",
             height=400,
             key="work_content_input"
         )
@@ -815,9 +799,8 @@ def main():
             🤖 Assistant
         </div>""", unsafe_allow_html=True)
 
-        doc_store = st.session_state.doc_vector_store
-        note_store = st.session_state.note_vector_store
-        has_context = (doc_store is not None) or (note_store is not None)
+        unified_store = st.session_state.unified_vector_store
+        has_context = unified_store is not None
 
         # ── Research mode indicator ───────────────────────────────────────
         if st.session_state._research_mode:
@@ -837,7 +820,7 @@ def main():
                         🔬 Research Mode
                     </span>
                     <span style="font-size: 0.85rem; color: #6b7280; margin-left: 8px;">
-                        คำตอบจะละเอียดขึ้นและแสดงใน Your Work editor
+                        คำตอบจะละเอียดขึ้นและแสดงใน Research Workbench
                     </span>
                 </div>
             </div>
@@ -853,7 +836,7 @@ def main():
                 with st.chat_message(message["role"]):
                     if message["role"] == "assistant":
                         if message.get("action") == "research":
-                            st.caption("🔬 Research — ผลลัพธ์อยู่ใน Your Work editor")
+                            st.caption("🔬 Research — ผลลัพธ์อยู่ใน Research Workbench")
                         elif message.get("action") == "edit":
                             st.caption("✏️ แก้ไขเอกสารแล้ว")
                         display_assistant_message(message["content"])
@@ -1123,14 +1106,12 @@ def main():
                 try:
                     chat_history = st.session_state.messages[:-1]
 
-                    # Retrieve from whichever stores are loaded (empty list if none)
+                    # Retrieve from unified collection (with parent expansion)
                     retrieval_k = 5 if is_research else 3
-                    if doc_store is not None or note_store is not None:
-                        retrieved_docs = retrieve_from_both_stores(
-                            doc_store, note_store, actual_query, k=retrieval_k
-                        )
-                    else:
-                        retrieved_docs = []
+                    retrieved_docs = retrieve_unified(
+                        unified_store, actual_query, k=retrieval_k,
+                        expand_parents=True,
+                    )
 
                     action, response_text, new_editor_content, input_tokens, output_tokens = (
                         generate_answer(

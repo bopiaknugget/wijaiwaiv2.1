@@ -1,11 +1,15 @@
 """
 Document Loader Module
-Handles PDF, TXT, DOCX/DOC loading and text chunking for the RAG pipeline.
+Handles PDF, TXT, DOCX/DOC loading, text chunking, and Advanced RAG preparation
+(rich metadata, parent-child chunking, adaptive chunk sizing).
 """
 
 import os
+import re
+import uuid
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
 
 
 def load_document(file_path):
@@ -100,43 +104,274 @@ def chunk_documents(documents, chunk_size=1000, chunk_overlap=200):
     """
     Split documents into overlapping chunks for better embedding context.
     Uses RecursiveCharacterTextSplitter to maintain semantic coherence.
-    
+
     Args:
         documents (list): List of Document objects from the loader
         chunk_size (int): Maximum characters per chunk (default: 1000)
         chunk_overlap (int): Characters to overlap between chunks (default: 200)
-        
+
     Returns:
         list: List of chunked Document objects
-        
+
     Raises:
         ValueError: If documents list is empty
         Exception: If chunking fails
     """
-    # Validate input documents
     if not documents:
         raise ValueError("❌ No documents provided for chunking")
-    
+
     try:
-        # Initialize the text splitter with specified parameters
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,           # Maximum chunk size in characters
-            chunk_overlap=chunk_overlap,     # Overlap for context continuity
-            separators=["\n\n", "\n", " ", ""]  # Split on paragraphs, then sentences, then words
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=["\n\n", "\n", " ", ""]
         )
-        
-        # Split documents into chunks
-        # This preserves metadata from original documents
+
         chunked_documents = text_splitter.split_documents(documents)
-        
+
         if not chunked_documents:
             raise ValueError("❌ Chunking resulted in no documents")
-        
+
         print(f"✓ Document chunking completed")
         print(f"✓ Total chunks created: {len(chunked_documents)}")
         print(f"✓ Chunk size: {chunk_size} chars | Overlap: {chunk_overlap} chars")
-        
+
         return chunked_documents
-    
+
     except Exception as e:
         raise Exception(f"❌ Error chunking documents: {str(e)}")
+
+
+# ── Advanced RAG: Rich Metadata ──────────────────────────────────────────────
+
+def _detect_section(text: str) -> str:
+    """Detect common academic paper sections from text content."""
+    text_lower = text[:200].lower().strip()
+    section_patterns = [
+        (r'\babstract\b', 'abstract'),
+        (r'\bintroduction\b', 'introduction'),
+        (r'\bliterature\s+review\b', 'literature_review'),
+        (r'\brelated\s+work\b', 'related_work'),
+        (r'\bmethodology\b|\bmethod\b|\bmethods\b', 'methodology'),
+        (r'\bresults?\b', 'results'),
+        (r'\bdiscussion\b', 'discussion'),
+        (r'\bconclusion\b', 'conclusion'),
+        (r'\breferences?\b|\bbibliography\b', 'references'),
+        (r'\backnowledg', 'acknowledgements'),
+        (r'\bappendix\b|\bappendices\b', 'appendix'),
+        (r'\bบทคัดย่อ\b', 'abstract'),
+        (r'\bบทนำ\b', 'introduction'),
+        (r'\bวิธีการ\b|\bระเบียบวิธี\b', 'methodology'),
+        (r'\bผลการ\b', 'results'),
+        (r'\bสรุป\b', 'conclusion'),
+        (r'\bเอกสารอ้างอิง\b|\bบรรณานุกรม\b', 'references'),
+    ]
+    for pattern, section in section_patterns:
+        if re.search(pattern, text_lower):
+            return section
+    return 'body'
+
+
+def _extract_paper_metadata(documents: list, filename: str) -> dict:
+    """Extract paper-level metadata from the first page of a document."""
+    meta = {'paper_title': '', 'authors': '', 'year': ''}
+    if not documents:
+        return meta
+    first_page = documents[0].page_content[:1500]
+    lines = [l.strip() for l in first_page.split('\n') if l.strip()]
+
+    # Heuristic: first non-empty line is likely the title
+    if lines:
+        meta['paper_title'] = lines[0][:200]
+
+    # Try to find year (4-digit number in range 1900-2099)
+    year_match = re.search(r'\b(19|20)\d{2}\b', first_page)
+    if year_match:
+        meta['year'] = year_match.group()
+
+    # Authors heuristic: second non-empty line or line with commas/and
+    for line in lines[1:5]:
+        if re.search(r'(,.*,|and\s|\bet\s+al)', line, re.IGNORECASE) or '@' in line:
+            meta['authors'] = line[:300]
+            break
+
+    return meta
+
+
+def enrich_metadata(documents: list, filename: str, source_type: str = "document",
+                    user_id: str = None, project_id: str = None) -> list:
+    """
+    Add rich metadata to each document page: paper_title, authors, year, section,
+    source_type, user_id, project_id, created_at.
+
+    Args:
+        documents: List of Document objects (one per page)
+        filename: Original filename
+        source_type: "document" or "note"
+        user_id: Optional user identifier
+        project_id: Optional project identifier
+
+    Returns:
+        list: Same documents with enriched metadata
+    """
+    from datetime import date
+    paper_meta = _extract_paper_metadata(documents, filename)
+
+    for doc in documents:
+        doc.metadata['source_type'] = source_type
+        doc.metadata['doc_name'] = filename
+        doc.metadata['paper_title'] = paper_meta['paper_title']
+        doc.metadata['authors'] = paper_meta['authors']
+        doc.metadata['year'] = paper_meta['year']
+        doc.metadata['section'] = _detect_section(doc.page_content)
+        doc.metadata['created_at'] = date.today().isoformat()
+        if user_id:
+            doc.metadata['user_id'] = user_id
+        if project_id:
+            doc.metadata['project_id'] = project_id
+
+    return documents
+
+
+# ── Advanced RAG: Adaptive Chunk Sizing ──────────────────────────────────────
+
+def get_adaptive_chunk_params(total_chars: int) -> tuple:
+    """
+    Return (chunk_size, chunk_overlap) adapted to content length.
+
+    - Short content (<2000 chars): small chunks for precision
+    - Medium content (2000–10000 chars): standard chunks
+    - Long content (>10000 chars): larger chunks for context
+    """
+    if total_chars < 2000:
+        return 300, 50
+    elif total_chars < 10000:
+        return 800, 150
+    else:
+        return 1200, 250
+
+
+# ── Advanced RAG: Parent-Child Chunking ──────────────────────────────────────
+
+def create_parent_child_chunks(documents: list, filename: str,
+                                source_type: str = "document",
+                                user_id: str = None,
+                                project_id: str = None) -> tuple:
+    """
+    Create parent-child chunk structure for Advanced RAG.
+
+    - Parent chunks: full page/large paragraphs stored in SQLite (for retrieval context)
+    - Child chunks: small sentences stored in ChromaDB (for vector search)
+    - Each child references its parent_id in metadata
+
+    Args:
+        documents: List of Document objects (one per page, already enriched)
+        filename: Original filename
+        source_type: "document" or "note"
+
+    Returns:
+        tuple: (child_documents, parent_records)
+            child_documents: list of small Document objects for ChromaDB
+            parent_records: list of dicts {id, content, source_file, page_number, section}
+    """
+    from datetime import date
+
+    # Determine adaptive chunk size based on total content
+    total_chars = sum(len(doc.page_content) for doc in documents)
+    child_size, child_overlap = get_adaptive_chunk_params(total_chars)
+
+    child_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=child_size,
+        chunk_overlap=child_overlap,
+        separators=["\n\n", "\n", "。", ".", " ", ""]
+    )
+
+    child_documents = []
+    parent_records = []
+
+    for doc in documents:
+        page_num = doc.metadata.get('page', 0)
+        section = doc.metadata.get('section', 'body')
+
+        # Parent = the full page content
+        parent_id = f"parent_{uuid.uuid4().hex[:12]}"
+        parent_records.append({
+            'id': parent_id,
+            'content': doc.page_content,
+            'source_file': filename,
+            'page_number': page_num,
+            'section': section,
+        })
+
+        # Children = small chunks from this page
+        children = child_splitter.split_documents([doc])
+        for child in children:
+            child.metadata['parent_id'] = parent_id
+            child.metadata['chunk_type'] = 'child'
+            child.metadata['source_type'] = source_type
+            child.metadata['doc_name'] = filename
+            child.metadata['created_at'] = date.today().isoformat()
+            if user_id:
+                child.metadata['user_id'] = user_id
+            if project_id:
+                child.metadata['project_id'] = project_id
+
+        child_documents.extend(children)
+
+    print(f"✓ Parent-Child chunking: {len(parent_records)} parents, "
+          f"{len(child_documents)} children (child_size={child_size})")
+    return child_documents, parent_records
+
+
+def create_summary_documents(documents: list, filename: str,
+                              generate_summary_fn=None) -> list:
+    """
+    Create summary embeddings for each page/section.
+
+    If generate_summary_fn is provided, it will be called with the page text
+    to produce an AI summary. Otherwise, a simple extractive summary (first 300 chars)
+    is used as a fallback.
+
+    Args:
+        documents: List of Document objects
+        filename: Source filename
+        generate_summary_fn: Optional callable(text) -> summary_text
+
+    Returns:
+        list: Summary Document objects to be added to ChromaDB
+    """
+    from datetime import date
+    summary_docs = []
+
+    for doc in documents:
+        page_num = doc.metadata.get('page', 0)
+        section = doc.metadata.get('section', 'body')
+
+        if generate_summary_fn:
+            try:
+                summary_text = generate_summary_fn(doc.page_content)
+            except Exception:
+                # Fallback to extractive summary on error
+                summary_text = doc.page_content[:300].strip()
+        else:
+            summary_text = doc.page_content[:300].strip()
+
+        if not summary_text:
+            continue
+
+        summary_doc = Document(
+            page_content=summary_text,
+            metadata={
+                'chunk_type': 'summary',
+                'source_type': doc.metadata.get('source_type', 'document'),
+                'doc_name': filename,
+                'page': page_num,
+                'section': section,
+                'paper_title': doc.metadata.get('paper_title', ''),
+                'created_at': date.today().isoformat(),
+            }
+        )
+        summary_docs.append(summary_doc)
+
+    print(f"✓ Created {len(summary_docs)} summary embeddings for {filename}")
+    return summary_docs

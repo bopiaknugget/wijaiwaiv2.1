@@ -1,6 +1,7 @@
 """
 Database Module for Research Workbench
-Handles storage and retrieval of research notes and document metadata.
+Handles storage and retrieval of research notes, document metadata,
+and parent chunks for Parent-Child Chunking (Advanced RAG).
 Uses context managers for all connections to prevent locks and leaks.
 """
 
@@ -56,6 +57,19 @@ def initialize_database():
                 file_type   TEXT,
                 chunk_count INTEGER DEFAULT 0,
                 db_path     TEXT,
+                timestamp   DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Parent chunks table for Parent-Child Chunking (Advanced RAG)
+        # Child chunks in ChromaDB reference parent_id to retrieve larger context
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS parent_chunks (
+                id          TEXT PRIMARY KEY,
+                content     TEXT NOT NULL,
+                source_file TEXT,
+                page_number INTEGER,
+                section     TEXT,
                 timestamp   DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -138,6 +152,68 @@ def delete_document_by_id(doc_id: int) -> bool:
         cursor.execute('DELETE FROM documents WHERE id = ?', (doc_id,))
         conn.commit()
         return cursor.rowcount > 0
+
+
+# ── Parent Chunks (Advanced RAG) ─────────────────────────────────────────────
+
+def save_parent_chunk(parent_id: str, content: str, source_file: str = None,
+                      page_number: int = None, section: str = None):
+    """Save a parent chunk. Uses INSERT OR REPLACE to allow updates."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'INSERT OR REPLACE INTO parent_chunks (id, content, source_file, page_number, section) '
+            'VALUES (?, ?, ?, ?, ?)',
+            (parent_id, content, source_file, page_number, section)
+        )
+        conn.commit()
+
+
+def get_parent_chunk(parent_id: str) -> dict | None:
+    """Retrieve a parent chunk by ID. Returns dict or None."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT id, content, source_file, page_number, section FROM parent_chunks WHERE id = ?',
+            (parent_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return {
+                'id': row[0], 'content': row[1], 'source_file': row[2],
+                'page_number': row[3], 'section': row[4]
+            }
+        return None
+
+
+def get_parent_chunks_batch(parent_ids: list) -> dict:
+    """Retrieve multiple parent chunks by IDs. Returns {id: dict}."""
+    if not parent_ids:
+        return {}
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        placeholders = ','.join('?' for _ in parent_ids)
+        cursor.execute(
+            f'SELECT id, content, source_file, page_number, section '
+            f'FROM parent_chunks WHERE id IN ({placeholders})',
+            parent_ids
+        )
+        return {
+            row[0]: {
+                'id': row[0], 'content': row[1], 'source_file': row[2],
+                'page_number': row[3], 'section': row[4]
+            }
+            for row in cursor.fetchall()
+        }
+
+
+def delete_parent_chunks_by_source(source_file: str) -> int:
+    """Delete all parent chunks for a given source file. Returns count deleted."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM parent_chunks WHERE source_file = ?', (source_file,))
+        conn.commit()
+        return cursor.rowcount
 
 
 # Initialize database on import (idempotent — CREATE TABLE IF NOT EXISTS)

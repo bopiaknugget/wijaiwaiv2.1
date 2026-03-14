@@ -35,7 +35,7 @@ The API key is loaded by `generator.py` using `python-dotenv`. No quotes or spac
 
 Two entry points exist for the same underlying pipeline:
 
-- **`app.py`** — Streamlit web UI with three panels: AI Assistant (chat), Research Notes (SQLite-backed), and a "Your Work" editor (saves files to `./your_work/`). State is managed with `st.session_state`. Note input fields use the "Value Proxy pattern" (separate `*_val` keys + `st.rerun()`) to avoid Streamlit widget key conflicts on save.
+- **`app.py`** — Streamlit web UI with three panels: Sidebar (Docs + Notes), Research Workbench (center editor, saves files to `./your_work/`), and Assistant (right chat panel). State is managed with `st.session_state`. Note input fields use the "Value Proxy pattern" (separate `*_val` keys + `st.rerun()`) to avoid Streamlit widget key conflicts on save.
 
 - **`main.py`** — CLI entry point with `--ingest` / `--query` modes.
 
@@ -44,8 +44,10 @@ Two entry points exist for the same underlying pipeline:
 In **app.py** (web UI):
 ```
 User question
-  → retrieve_from_both_stores() [vector_store.py]
-      → merges results from session doc store + persistent notes store (deduplicates by content)
+  → retrieve_unified() [vector_store.py]
+      → MMR search on unified collection (metadata-filtered)
+      → Parent-child expansion: child match → fetch parent content from SQLite
+      → Deduplication by content
   → generate_answer(query, retrieved_docs, chat_history) [generator.py]
       → optional: re-phrase query via API if chat_history exists
       → _call_api() → POST to OpenThaiGPT API
@@ -54,24 +56,29 @@ User question
       → think shown in collapsible expander; answer shown normally
 ```
 
-In **main.py** (CLI), only one ChromaDB is used, so `retrieve_mmr()` is called directly (MMR with `lambda_mult=0.6`).
+In **main.py** (CLI), `retrieve_mmr()` is called directly (MMR with `lambda_mult=0.6`).
 
 ### Module responsibilities
 
 | File | Responsibility |
 |---|---|
-| `app.py` | Streamlit UI, session state, `<think>` tag parsing/display, work editor |
+| `app.py` | Streamlit UI, session state, `<think>` tag parsing/display, Research Workbench editor |
 | `generator.py` | OpenThaiGPT API calls, chat-history-based query re-phrasing |
-| `vector_store.py` | HuggingFace embeddings (local, no API key), ChromaDB lifecycle |
-| `document_loader.py` | PDF/TXT/DOCX loading, text chunking (1000 chars, 200 overlap) |
-| `database.py` | SQLite CRUD for research notes and document metadata (`research_notes.db`) |
+| `vector_store.py` | HuggingFace embeddings (local, no API key), unified ChromaDB collection, parent-child retrieval |
+| `document_loader.py` | PDF/TXT/DOCX loading, rich metadata extraction, parent-child chunking, adaptive chunk sizing, summary embedding |
+| `database.py` | SQLite CRUD for research notes, document metadata, and parent chunks (`research_notes.db`) |
 | `main.py` | CLI wrapper around the same pipeline modules |
-| `rag_pipeline.py` | **Legacy Phase 1 reference only — do not use or extend** (uses deprecated `langchain.document_loaders` imports) |
+| `rag_pipeline.py` | **Legacy Phase 1 reference only — do not use or extend** |
 
 ### Key implementation details
 
 - **Embeddings** use `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (local HuggingFace, ~400MB, supports Thai). Cached with `@st.cache_resource`.
-- **ChromaDB** auto-persists. PDFs go to `./temp_chroma_db_<uuid>` (per Streamlit session), notes go to `./notes_chroma_db` (persistent). `get_or_create_vector_store()` loads from disk if path exists, creates new only if documents are provided — avoids re-embedding costs.
+- **ChromaDB** uses a single unified collection (`./unified_chroma_db`) for both documents and notes, separated by `source_type` metadata. `get_or_create_vector_store()` loads from disk if path exists, creates new only if documents are provided.
+- **Advanced RAG** techniques:
+  - **Rich Metadata**: Each chunk carries `paper_title`, `authors`, `year`, `section`, `source_type`, `created_at`.
+  - **Parent-Child Chunking**: Small child chunks are stored in ChromaDB for precise vector search; parent content (full pages) is stored in SQLite. On retrieval, child matches are expanded to parent content for richer LLM context.
+  - **Summary Embedding**: Extractive summaries of each page are also embedded in ChromaDB for broad semantic matching.
+  - **Adaptive Chunk Sizing**: Chunk size auto-adjusts based on total content length (<2k→300, 2k-10k→800, >10k→1200 chars).
 - **`<think>` tag handling**: `parse_think_content()` in `app.py` uses regex to extract `<think>...</think>` blocks. `generator.py` strips these tags from chat history before sending to the API for context re-phrasing.
 - **Token cost** is calculated at `$0.4 / 1M tokens`, displayed in THB (1 USD = 35 THB). Tracked in `st.session_state.total_tokens` and `total_cost_thb`.
-- **Research notes** are both saved to SQLite and embedded into the vector store, making them searchable alongside PDF content.
+- **Research notes** are saved to SQLite and embedded into the unified vector store with `source_type='note'`, making them searchable alongside document content.
