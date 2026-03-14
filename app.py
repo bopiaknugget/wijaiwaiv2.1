@@ -11,6 +11,7 @@ Key improvements in this version:
 """
 
 import gc
+import json
 import os
 import re
 import shutil
@@ -22,7 +23,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 import database
 from document_loader import load_document, chunk_documents
-from generator import generate_answer
+from generator import generate_answer, generate_selection_edit
 from vector_store import (
     initialize_embeddings,
     get_or_create_vector_store,
@@ -179,6 +180,54 @@ def main():
 
     # ── Loading screen (first run only) ───────────────────────────────────────
     if not st.session_state._app_initialized:
+        # ── Splash screen: Logo + App name ────────────────────────────────
+        splash = st.empty()
+        with splash.container():
+            st.markdown("""
+            <style>
+            @keyframes pulseGlow {
+                0%, 100% { opacity: 1; transform: scale(1); filter: drop-shadow(0 0 0px rgba(102,126,234,0)); }
+                50% { opacity: 0.6; transform: scale(1.08); filter: drop-shadow(0 0 18px rgba(102,126,234,0.5)); }
+            }
+            @keyframes fadeInUp {
+                from { opacity: 0; transform: translateY(24px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            .splash-screen {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                min-height: 92vh;
+                text-align: center;
+                background: linear-gradient(160deg, #f8faff 0%, #f0f4ff 40%, #f5f0ff 100%);
+                border-radius: 16px;
+            }
+            .splash-logo {
+                font-size: 6rem;
+                animation: pulseGlow 2s ease-in-out infinite;
+                margin-bottom: 1.2rem;
+            }
+            .splash-title {
+                font-size: 2.4rem;
+                font-weight: 800;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+                animation: fadeInUp 1s ease-out 0.3s both;
+            }
+            </style>
+            <div class="splash-screen">
+                <div class="splash-logo">🔬</div>
+                <div class="splash-title">Research Workbench</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        import time
+        time.sleep(2.5)
+        splash.empty()
+
+        # ── Loading progress screen ──────────────────────────────────────
         loading = st.empty()
         with loading.container():
             st.markdown("""
@@ -541,7 +590,7 @@ def main():
                 help="Redo the last undone AI edit",
             )
 
-        btn_export, btn_import = st.columns([1, 1])
+        btn_export, btn_import, btn_clear = st.columns([1, 1, 1])
         with btn_export:
             export_data = (
                 f"TITLE: {work_title}\n---\n{work_content}"
@@ -562,6 +611,9 @@ def main():
         with btn_import:
             import_clicked = st.button("📥 Import", type="secondary",
                                        key="import_work_btn", use_container_width=True)
+        with btn_clear:
+            clear_editor_clicked = st.button("🗑️ Clear", type="secondary",
+                                             key="clear_editor_btn", use_container_width=True)
 
         # ── Button logic ───────────────────────────────────────────────────────
         if save_clicked:
@@ -596,6 +648,16 @@ def main():
             st.session_state.work_import_open = True
             st.session_state.work_load_select = False
             st.session_state.work_save_dialog = None
+
+        if clear_editor_clicked:
+            st.session_state["_pending_work_title"] = ""
+            st.session_state["_pending_work_content"] = ""
+            st.session_state.work_title_val = ""
+            st.session_state.work_content_val = ""
+            st.session_state.work_current_file = None
+            st.session_state.ai_edit_undo_stack = []
+            st.session_state.ai_edit_redo_stack = []
+            st.rerun()
 
         if undo_clicked and st.session_state.ai_edit_undo_stack:
             st.session_state.ai_edit_redo_stack.append(work_content)
@@ -794,6 +856,18 @@ def main():
         import streamlit.components.v1 as components
         components.html("""
         <script>
+        // ── Hide Streamlit widget default-value warnings ──
+        const _hideWidgetWarnings = () => {
+            const alerts = parent.document.querySelectorAll('[data-testid="stAlert"], .stAlert');
+            alerts.forEach(el => {
+                if (el.textContent.includes('was created with a default value')) {
+                    el.style.display = 'none';
+                }
+            });
+        };
+        setInterval(_hideWidgetWarnings, 300);
+
+        // ── Autocomplete: /r + Tab → /research ──
         const _setupAutocomplete = () => {
             const textarea = parent.document.querySelector(
                 'textarea[data-testid="stChatInputTextArea"]'
@@ -814,7 +888,6 @@ def main():
                 }
             });
         };
-        // Retry until Streamlit renders the textarea
         const _iv = setInterval(() => {
             const ta = parent.document.querySelector(
                 'textarea[data-testid="stChatInputTextArea"]'
@@ -822,6 +895,107 @@ def main():
             if (ta) { clearInterval(_iv); _setupAutocomplete(); }
         }, 300);
         setTimeout(() => clearInterval(_iv), 10000);
+
+        // ── Content Edit: right-click on selected text → floating chatbox ──
+        const _removeEditOverlay = () => {
+            const el = parent.document.getElementById('__ceOverlay');
+            if (el) el.remove();
+        };
+
+        const _showEditOverlay = (x, y, selectedText) => {
+            _removeEditOverlay();
+            const overlay = parent.document.createElement('div');
+            overlay.id = '__ceOverlay';
+            overlay.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:999999;background:rgba(0,0,0,0.12);';
+
+            const boxW = 350;
+            let bx = Math.min(x + 4, parent.innerWidth - boxW - 16);
+            let by = Math.min(y + 4, parent.innerHeight - 260);
+            bx = Math.max(8, bx); by = Math.max(8, by);
+
+            const preview = selectedText.length > 120
+                ? selectedText.substring(0, 120).replace(/</g, '&lt;') + '...'
+                : selectedText.replace(/</g, '&lt;');
+
+            overlay.innerHTML = `
+            <div style="position:fixed;left:${bx}px;top:${by}px;width:${boxW}px;background:#fff;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.2);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow:hidden;border:1px solid #e0e0e0;">
+                <div style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;padding:10px 16px;font-weight:600;font-size:14px;display:flex;justify-content:space-between;align-items:center;">
+                    <span>&#9999;&#65039; Edit</span>
+                    <span id="__ceClose" style="cursor:pointer;font-size:18px;opacity:0.8;">&#10005;</span>
+                </div>
+                <div style="padding:12px 16px;">
+                    <div style="background:#f8f9fa;border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:12px;color:#555;max-height:60px;overflow-y:auto;border:1px solid #eee;white-space:pre-wrap;word-break:break-word;">${preview}</div>
+                    <input type="text" id="__ceInput" placeholder="อธิบายว่าต้องการแก้ไขอย่างไร..."
+                        style="width:100%;box-sizing:border-box;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:13px;outline:none;"
+                    />
+                    <div style="display:flex;gap:8px;margin-top:10px;">
+                        <button id="__ceSubmit" style="flex:1;padding:9px;border:none;border-radius:8px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;font-weight:600;cursor:pointer;font-size:13px;">แก้ไข</button>
+                        <button id="__ceCancel" style="flex:1;padding:9px;border:1.5px solid #ddd;border-radius:8px;background:#fff;color:#555;cursor:pointer;font-size:13px;">ยกเลิก</button>
+                    </div>
+                </div>
+            </div>`;
+
+            parent.document.body.appendChild(overlay);
+            setTimeout(() => {
+                const inp = parent.document.getElementById('__ceInput');
+                if (inp) inp.focus();
+            }, 50);
+
+            // Submit handler
+            parent.document.getElementById('__ceSubmit').addEventListener('click', () => {
+                const instruction = parent.document.getElementById('__ceInput').value.trim();
+                if (!instruction) return;
+                const cmd = '__EDIT__' + JSON.stringify({s: selectedText, i: instruction});
+                const chatTA = parent.document.querySelector('textarea[data-testid="stChatInputTextArea"]');
+                if (chatTA) {
+                    const nset = Object.getOwnPropertyDescriptor(
+                        window.HTMLTextAreaElement.prototype, 'value'
+                    ).set;
+                    nset.call(chatTA, cmd);
+                    chatTA.dispatchEvent(new Event('input', {bubbles: true}));
+                    setTimeout(() => {
+                        const btn = parent.document.querySelector('button[data-testid="stChatInputSubmitButton"]');
+                        if (btn) btn.click();
+                    }, 150);
+                }
+                _removeEditOverlay();
+            });
+
+            // Enter key submits
+            parent.document.getElementById('__ceInput').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') parent.document.getElementById('__ceSubmit').click();
+            });
+
+            // Cancel / close
+            parent.document.getElementById('__ceCancel').addEventListener('click', _removeEditOverlay);
+            parent.document.getElementById('__ceClose').addEventListener('click', _removeEditOverlay);
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) _removeEditOverlay(); });
+        };
+
+        const _setupContentEdit = () => {
+            const textareas = parent.document.querySelectorAll('textarea');
+            for (const ta of textareas) {
+                if (ta.placeholder && ta.placeholder.includes('Start writing')) {
+                    if (ta._contentEditAttached) return;
+                    ta._contentEditAttached = true;
+                    ta.addEventListener('contextmenu', function(e) {
+                        const sel = this.value.substring(this.selectionStart, this.selectionEnd);
+                        if (!sel.trim()) return;
+                        e.preventDefault();
+                        _showEditOverlay(e.clientX, e.clientY, sel);
+                    });
+                }
+            }
+        };
+
+        const _ceIv = setInterval(() => {
+            _setupContentEdit();
+            const found = Array.from(parent.document.querySelectorAll('textarea')).some(
+                ta => ta.placeholder && ta.placeholder.includes('Start writing') && ta._contentEditAttached
+            );
+            if (found) clearInterval(_ceIv);
+        }, 500);
+        setTimeout(() => clearInterval(_ceIv), 15000);
         </script>
         """, height=0)
 
@@ -840,6 +1014,54 @@ def main():
             st.rerun()
 
         if prompt:
+            # ── Detect content edit command from right-click overlay ──────
+            if prompt.startswith("__EDIT__"):
+                try:
+                    edit_data = json.loads(prompt[8:])
+                    selected = edit_data["s"]
+                    instruction = edit_data["i"]
+
+                    st.session_state.messages.append({
+                        "role": "user",
+                        "content": f"✏️ แก้ไขข้อความ: {instruction}",
+                    })
+
+                    with st.spinner("✏️ กำลังแก้ไขข้อความที่เลือก..."):
+                        edited, ri, ro = generate_selection_edit(
+                            selected, instruction
+                        )
+                        new_content = work_content.replace(selected, edited, 1)
+
+                        st.session_state.ai_edit_undo_stack.append(work_content)
+                        if len(st.session_state.ai_edit_undo_stack) > 20:
+                            st.session_state.ai_edit_undo_stack.pop(0)
+                        st.session_state.ai_edit_redo_stack = []
+                        st.session_state["_pending_work_content"] = new_content
+                        st.session_state.work_content_val = new_content
+
+                        total_tokens_turn = ri + ro
+                        cost_thb = (total_tokens_turn / 1_000_000) * 0.4 * 35
+                        st.session_state.total_tokens += total_tokens_turn
+                        st.session_state.total_cost_thb += cost_thb
+
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": (
+                                f"✏️ แก้ไขข้อความที่เลือกเรียบร้อยแล้ว\n\n"
+                                f"คำสั่ง: {instruction}"
+                            ),
+                            "tokens": total_tokens_turn,
+                            "cost_thb": cost_thb,
+                            "action": "edit",
+                        })
+                    st.rerun()
+                except Exception as e:
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": f"❌ เกิดข้อผิดพลาดในการแก้ไข: {str(e)}"
+                    })
+                    st.rerun()
+
             # ── Detect /research prefix ───────────────────────────────────
             is_research = False
             actual_query = prompt

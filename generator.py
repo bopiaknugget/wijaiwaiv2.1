@@ -275,6 +275,38 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
     return action, response_text, new_editor, total_input, total_output
 
 
+def generate_selection_edit(selected_text, instruction):
+    """
+    Edit a selected piece of text according to user instruction.
+    Returns (edited_text, input_tokens, output_tokens).
+    """
+    env_path = Path(__file__).parent / ".env"
+    load_dotenv(dotenv_path=env_path)
+    api_key = os.getenv("OPENTHAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENTHAI_API_KEY not found")
+
+    system_prompt = (
+        "คุณเป็นผู้ช่วยแก้ไขข้อความ ผู้ใช้จะส่งข้อความที่เลือกไว้ "
+        "พร้อมคำสั่งว่าต้องการแก้ไขอย่างไร\n"
+        "ตอบเฉพาะข้อความที่แก้ไขแล้วเท่านั้น ห้ามมีคำอธิบายหรือข้อความเพิ่มเติม "
+        "ห้ามใส่เครื่องหมายคำพูดครอบข้อความ"
+    )
+    user_msg = (
+        f"ข้อความที่เลือก:\n\"\"\"\n{selected_text}\n\"\"\"\n\n"
+        f"คำสั่งแก้ไข: {instruction}"
+    )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_msg},
+    ]
+    content, input_tokens, output_tokens = _call_api(
+        messages, api_key, max_tokens=2048, temperature=0.3
+    )
+    content = _THINK_RE.sub('', content).strip()
+    return content, input_tokens, output_tokens
+
+
 def print_generated_answer(query, answer):
     """
     Pretty-print the AI-generated answer (CLI use).
