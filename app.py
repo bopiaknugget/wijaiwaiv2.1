@@ -149,6 +149,128 @@ def main():
         layout="wide"
     )
 
+    # ── Session state defaults ─────────────────────────────────────────────────
+    defaults = {
+        "doc_vector_store": None,       # Session-scoped: uploaded documents
+        "note_vector_store": None,      # Persistent: research notes
+        "processed_docs": [],           # [{"name": str, "chunks": int}]
+        "messages": [],
+        "total_tokens": 0,
+        "total_cost_thb": 0.0,
+        "note_title_val": "",
+        "note_content_val": "",
+        "work_title_val": "",
+        "work_content_val": "",
+        "work_current_file": None,
+        "work_load_select": None,
+        "work_save_dialog": None,
+        "work_save_dialog_name": "",
+        "work_import_open": False,
+        "temp_db_path": f"./temp_chroma_db_{uuid.uuid4().hex[:8]}",
+        "_notes_store_initialised": False,
+        "_app_initialized": False,
+        "_research_mode": False,
+        "ai_edit_undo_stack": [],   # list of editor content snapshots (before AI edits)
+        "ai_edit_redo_stack": [],   # list of editor content snapshots (after undone AI edits)
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+    # ── Loading screen (first run only) ───────────────────────────────────────
+    if not st.session_state._app_initialized:
+        loading = st.empty()
+        with loading.container():
+            st.markdown("""
+            <style>
+            @keyframes pulse {
+                0%, 100% { opacity: 1; }
+                50% { opacity: 0.4; }
+            }
+            .loading-screen {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                min-height: 80vh;
+                text-align: center;
+            }
+            .loading-icon {
+                font-size: 4rem;
+                animation: pulse 2s ease-in-out infinite;
+                margin-bottom: 1rem;
+            }
+            .loading-title {
+                font-size: 2rem;
+                font-weight: 700;
+                color: #1f2937;
+                margin-bottom: 0.5rem;
+            }
+            .loading-subtitle {
+                font-size: 1rem;
+                color: #6b7280;
+                margin-bottom: 2rem;
+            }
+            .loading-step {
+                font-size: 0.95rem;
+                color: #374151;
+                margin: 0.3rem 0;
+            }
+            .loading-step .done { color: #10b981; }
+            .loading-step .working { color: #3b82f6; animation: pulse 1.5s ease-in-out infinite; }
+            </style>
+            <div class="loading-screen">
+                <div class="loading-icon">🔬</div>
+                <div class="loading-title">Research Workbench</div>
+                <div class="loading-subtitle">กำลังเตรียมระบบ...</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            progress = st.progress(0, text="เริ่มต้นระบบ...")
+
+            # Step 1: Load embeddings model (~400MB)
+            progress.progress(15, text="📦 กำลังโหลด Embedding Model...")
+            embeddings = initialize_embeddings()
+            progress.progress(60, text="✅ โหลด Embedding Model สำเร็จ")
+
+            # Step 2: Load notes vector store
+            progress.progress(70, text="📝 กำลังโหลดฐานข้อมูลโน้ต...")
+            if not st.session_state._notes_store_initialised:
+                if os.path.exists(NOTES_DB_PATH):
+                    try:
+                        st.session_state.note_vector_store = _load_note_vector_store(embeddings)
+                    except Exception:
+                        st.session_state.note_vector_store = None
+                st.session_state._notes_store_initialised = True
+            progress.progress(90, text="✅ โหลดฐานข้อมูลโน้ตสำเร็จ")
+
+            # Step 3: Finalize
+            progress.progress(100, text="✅ พร้อมใช้งาน!")
+
+            import time
+            time.sleep(0.8)
+
+        # Clear loading screen and mark as initialized
+        loading.empty()
+        st.session_state._app_initialized = True
+        st.session_state._cached_embeddings = embeddings
+        st.rerun()
+
+    # ── App already initialized — retrieve cached embeddings ──────────────────
+    embeddings = st.session_state.get("_cached_embeddings")
+    if embeddings is None:
+        embeddings = initialize_embeddings()
+        st.session_state._cached_embeddings = embeddings
+
+    # Apply pending editor content BEFORE any widget is rendered
+    for widget_key, pending_key in [
+        ("work_title_input", "_pending_work_title"),
+        ("work_content_input", "_pending_work_content"),
+    ]:
+        if pending_key in st.session_state:
+            st.session_state[widget_key] = st.session_state.pop(pending_key)
+
+    # ── Styles ────────────────────────────────────────────────────────────────
     st.markdown("""
     <style>
     .think-block {
@@ -173,52 +295,6 @@ def main():
     }
     </style>
     """, unsafe_allow_html=True)
-
-    # ── Session state defaults ─────────────────────────────────────────────────
-    defaults = {
-        "doc_vector_store": None,       # Session-scoped: uploaded documents
-        "note_vector_store": None,      # Persistent: research notes
-        "processed_docs": [],           # [{"name": str, "chunks": int}]
-        "messages": [],
-        "total_tokens": 0,
-        "total_cost_thb": 0.0,
-        "note_title_val": "",
-        "note_content_val": "",
-        "work_title_val": "",
-        "work_content_val": "",
-        "work_current_file": None,
-        "work_load_select": None,
-        "work_save_dialog": None,
-        "work_save_dialog_name": "",
-        "work_import_open": False,
-        "temp_db_path": f"./temp_chroma_db_{uuid.uuid4().hex[:8]}",
-        "_notes_store_initialised": False,
-        "ai_edit_undo_stack": [],   # list of editor content snapshots (before AI edits)
-        "ai_edit_redo_stack": [],   # list of editor content snapshots (after undone AI edits)
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-    # Apply pending editor content BEFORE any widget is rendered
-    for widget_key, pending_key in [
-        ("work_title_input", "_pending_work_title"),
-        ("work_content_input", "_pending_work_content"),
-    ]:
-        if pending_key in st.session_state:
-            st.session_state[widget_key] = st.session_state.pop(pending_key)
-
-    # ── Load embeddings (cached, runs once per session) ───────────────────────
-    embeddings = initialize_embeddings()
-
-    # ── Load persistent notes store on first run ──────────────────────────────
-    if not st.session_state._notes_store_initialised:
-        if os.path.exists(NOTES_DB_PATH):
-            try:
-                st.session_state.note_vector_store = _load_note_vector_store(embeddings)
-            except Exception:
-                st.session_state.note_vector_store = None
-        st.session_state._notes_store_initialised = True
 
     # ============================================================================
     # SIDEBAR — Documents + Notes tabs
@@ -646,12 +722,42 @@ def main():
         note_store = st.session_state.note_vector_store
         has_context = (doc_store is not None) or (note_store is not None)
 
+        # ── Research mode indicator ───────────────────────────────────────
+        if st.session_state._research_mode:
+            st.markdown("""
+            <div style="
+                background: linear-gradient(135deg, #eff6ff 0%, #f0fdf4 100%);
+                border: 2px solid #3b82f6;
+                border-radius: 10px;
+                padding: 10px 16px;
+                margin-bottom: 8px;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+            ">
+                <div>
+                    <span style="font-size: 1.1rem; font-weight: 700; color: #1e40af;">
+                        🔬 Research Mode
+                    </span>
+                    <span style="font-size: 0.85rem; color: #6b7280; margin-left: 8px;">
+                        คำตอบจะละเอียดขึ้นและแสดงใน Your Work editor
+                    </span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button("✕ ออกจาก Research Mode", key="exit_research_mode_btn",
+                         type="secondary", use_container_width=True):
+                st.session_state._research_mode = False
+                st.rerun()
+
         chat_container = st.container(height=480)
         with chat_container:
             for message in st.session_state.messages:
                 with st.chat_message(message["role"]):
                     if message["role"] == "assistant":
-                        if message.get("action") == "edit":
+                        if message.get("action") == "research":
+                            st.caption("🔬 Research — ผลลัพธ์อยู่ใน Your Work editor")
+                        elif message.get("action") == "edit":
                             st.caption("✏️ แก้ไขเอกสารแล้ว")
                         display_assistant_message(message["content"])
                         if "tokens" in message:
@@ -674,16 +780,54 @@ def main():
                                         if len(preview) > 300 else preview
                                     )
                     else:
+                        # Show research badge on user message if it was a /research query
+                        if message.get("research"):
+                            st.caption("🔬 Research Mode")
                         st.write(message["content"])
             if not st.session_state.messages and not has_context:
                 st.info(
-                    "📄 Upload documents or save a note for RAG-based answers. "
-                    "You can also give edit commands directly (e.g. 'สร้าง template วิจัย')."
+                    "📄 Upload documents or save a note for RAG-based answers.\n\n"
+                    "💡 พิมพ์ `/research` ก่อนคำถามเพื่อเข้าสู่โหมดค้นคว้าเชิงลึก"
                 )
+
+        # ── Tab-autocomplete JS: /r → /research ──────────────────────────
+        import streamlit.components.v1 as components
+        components.html("""
+        <script>
+        const _setupAutocomplete = () => {
+            const textarea = parent.document.querySelector(
+                'textarea[data-testid="stChatInputTextArea"]'
+            );
+            if (!textarea || textarea._rcAutoComplete) return;
+            textarea._rcAutoComplete = true;
+            textarea.addEventListener('keydown', function(e) {
+                if (e.key !== 'Tab') return;
+                const val = this.value;
+                if (val.match(/^\\/r(?!esearch)/) ) {
+                    e.preventDefault();
+                    const rest = val.replace(/^\\/r\\s*/, '');
+                    const nset = Object.getOwnPropertyDescriptor(
+                        window.HTMLTextAreaElement.prototype, 'value'
+                    ).set;
+                    nset.call(this, '/research ' + rest);
+                    this.dispatchEvent(new Event('input', {bubbles: true}));
+                }
+            });
+        };
+        // Retry until Streamlit renders the textarea
+        const _iv = setInterval(() => {
+            const ta = parent.document.querySelector(
+                'textarea[data-testid="stChatInputTextArea"]'
+            );
+            if (ta) { clearInterval(_iv); _setupAutocomplete(); }
+        }, 300);
+        setTimeout(() => clearInterval(_iv), 10000);
+        </script>
+        """, height=0)
 
         # Chat input
         prompt = st.chat_input(
-            "Ask a question or give an edit command (e.g. 'แก้ไขงานนี้ให้กะทัดรัดขึ้น')...",
+            "พิมพ์ /r + Tab → /research | ถามคำถาม หรือ สั่งแก้ไขเอกสาร...",
             key="chat_input_main",
         )
 
@@ -696,24 +840,46 @@ def main():
             st.rerun()
 
         if prompt:
-            st.session_state.messages.append({"role": "user", "content": prompt})
+            # ── Detect /research prefix ───────────────────────────────────
+            is_research = False
+            actual_query = prompt
+            if re.match(r'^/research\b\s*', prompt, re.IGNORECASE):
+                is_research = True
+                actual_query = re.sub(r'^/research\s*', '', prompt, flags=re.IGNORECASE).strip()
+                st.session_state._research_mode = True
+            elif st.session_state._research_mode:
+                is_research = True
 
-            with st.spinner("Analyzing..."):
+            # If /research was typed alone with no query, just toggle mode on
+            if is_research and not actual_query:
+                st.session_state._research_mode = True
+                st.rerun()
+
+            st.session_state.messages.append({
+                "role": "user",
+                "content": actual_query,
+                "research": is_research,
+            })
+
+            spinner_text = "🔬 กำลังค้นคว้าเชิงลึก..." if is_research else "Analyzing..."
+            with st.spinner(spinner_text):
                 try:
                     chat_history = st.session_state.messages[:-1]
 
                     # Retrieve from whichever stores are loaded (empty list if none)
+                    retrieval_k = 5 if is_research else 3
                     if doc_store is not None or note_store is not None:
                         retrieved_docs = retrieve_from_both_stores(
-                            doc_store, note_store, prompt, k=3
+                            doc_store, note_store, actual_query, k=retrieval_k
                         )
                     else:
                         retrieved_docs = []
 
                     action, response_text, new_editor_content, input_tokens, output_tokens = (
                         generate_answer(
-                            prompt, retrieved_docs, chat_history,
+                            actual_query, retrieved_docs, chat_history,
                             editor_content=work_content,
+                            research_mode=is_research,
                         )
                     )
 
@@ -732,8 +898,8 @@ def main():
                         "action": action,
                     })
 
-                    # Push new content into the editor when the AI performs an edit
-                    if action == "edit" and new_editor_content:
+                    # Push new content into the editor for edit/research actions
+                    if action in ("edit", "research") and new_editor_content:
                         # Snapshot current content for undo (cap stack at 20)
                         st.session_state.ai_edit_undo_stack.append(work_content)
                         if len(st.session_state.ai_edit_undo_stack) > 20:

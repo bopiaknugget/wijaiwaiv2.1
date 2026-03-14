@@ -82,7 +82,8 @@ def _extract_json(text: str):
     return None
 
 
-def generate_answer(query, retrieved_docs, chat_history=None, editor_content=None):
+def generate_answer(query, retrieved_docs, chat_history=None, editor_content=None,
+                    research_mode=False):
     """
     Generate an AI-powered answer or editor action using OpenThaiGPT API.
 
@@ -95,12 +96,13 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
         retrieved_docs (list): Retrieved Document objects from vector store (may be empty)
         chat_history (list, optional): Previous messages for context re-phrasing
         editor_content (str, optional): Current content of the work editor
+        research_mode (bool): When True, use research-optimised prompt with higher token budget
 
     Returns:
         tuple: (action, response_text, new_editor_content, input_tokens, output_tokens)
-            action (str): "chat" or "edit"
+            action (str): "chat", "edit", or "research"
             response_text (str): Message to display in chat
-            new_editor_content (str | None): New editor text when action="edit", else None
+            new_editor_content (str | None): New editor text when action="edit"/"research", else None
             input_tokens (int): Cumulative API input token count
             output_tokens (int): Cumulative API output token count
     """
@@ -165,19 +167,44 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
             "ให้ใช้ความรู้ทั่วไปของ AI ในการตอบและแก้ไขเอกสารได้เลย"
         )
 
-    system_prompt = (
-        "คุณเป็น Agentic Research Editor ที่ช่วยนักวิจัยทั้งในการตอบคำถามและแก้ไขเอกสาร\n\n"
-        f"{knowledge_instruction}\n\n"
-        "จำแนกคำสั่งของผู้ใช้เป็น:\n"
-        "- \"chat\" = ถามคำถาม ขอข้อมูล ขอคำอธิบาย สรุปเนื้อหา\n"
-        "- \"edit\" = สั่งให้แก้ไข เขียนใหม่ สร้าง ปรับปรุง จัดรูปแบบ หรือ generate เนื้อหาในตัวแก้ไข\n\n"
-        "ตอบในรูปแบบ JSON เท่านั้น ห้ามมีข้อความอื่นนอก JSON:\n"
-        "{\n"
-        "  \"action\": \"chat\" หรือ \"edit\",\n"
-        "  \"response\": \"ข้อความที่จะแสดงในช่องสนทนา (สำหรับ edit ให้อธิบายสั้นๆ ว่าทำอะไรไป)\",\n"
-        "  \"editor_content\": \"เนื้อหาใหม่สำหรับตัวแก้ไข (ใส่เมื่อ action=edit เท่านั้น มิฉะนั้นใส่ null)\"\n"
-        "}"
-    )
+    if research_mode:
+        system_prompt = (
+            "คุณเป็นนักวิจัยผู้เชี่ยวชาญ (Deep Research Agent) "
+            "ทำหน้าที่ค้นคว้า วิเคราะห์ และสังเคราะห์ข้อมูลอย่างละเอียดถี่ถ้วน\n\n"
+            f"{knowledge_instruction}\n\n"
+            "แนวทางการทำงาน:\n"
+            "1. วิเคราะห์คำถามหรือหัวข้อวิจัยอย่างรอบด้าน พิจารณาทุกมุมมอง\n"
+            "2. ใช้บริบทจากเอกสารที่ให้มาอย่างเต็มที่ อ้างอิงข้อมูลที่เกี่ยวข้อง\n"
+            "3. เขียนผลการวิจัยอย่างละเอียด ครอบคลุม เจาะลึก\n"
+            "4. จัดโครงสร้างเนื้อหาให้ชัดเจน ประกอบด้วย:\n"
+            "   - บทนำ / ที่มาและความสำคัญ\n"
+            "   - เนื้อหาหลัก / การวิเคราะห์\n"
+            "   - ผลการศึกษา / ข้อค้นพบ\n"
+            "   - สรุปและข้อเสนอแนะ\n"
+            "   - แหล่งอ้างอิง (ถ้ามี)\n"
+            "5. ใช้ภาษาทางวิชาการที่เข้าใจง่าย เหมาะสำหรับงานวิจัย\n"
+            "6. เขียนเนื้อหาให้ยาวและละเอียดที่สุดเท่าที่จะทำได้\n\n"
+            "ตอบในรูปแบบ JSON เท่านั้น ห้ามมีข้อความอื่นนอก JSON:\n"
+            "{\n"
+            "  \"action\": \"research\",\n"
+            "  \"response\": \"สรุปสั้นๆ สิ่งที่ค้นคว้า (1-2 ประโยค สำหรับแสดงใน chat)\",\n"
+            "  \"editor_content\": \"เนื้อหาวิจัยฉบับเต็ม — เขียนอย่างละเอียด มีโครงสร้างครบถ้วน\"\n"
+            "}"
+        )
+    else:
+        system_prompt = (
+            "คุณเป็น Agentic Research Editor ที่ช่วยนักวิจัยทั้งในการตอบคำถามและแก้ไขเอกสาร\n\n"
+            f"{knowledge_instruction}\n\n"
+            "จำแนกคำสั่งของผู้ใช้เป็น:\n"
+            "- \"chat\" = ถามคำถาม ขอข้อมูล ขอคำอธิบาย สรุปเนื้อหา\n"
+            "- \"edit\" = สั่งให้แก้ไข เขียนใหม่ สร้าง ปรับปรุง จัดรูปแบบ หรือ generate เนื้อหาในตัวแก้ไข\n\n"
+            "ตอบในรูปแบบ JSON เท่านั้น ห้ามมีข้อความอื่นนอก JSON:\n"
+            "{\n"
+            "  \"action\": \"chat\" หรือ \"edit\",\n"
+            "  \"response\": \"ข้อความที่จะแสดงในช่องสนทนา (สำหรับ edit ให้อธิบายสั้นๆ ว่าทำอะไรไป)\",\n"
+            "  \"editor_content\": \"เนื้อหาใหม่สำหรับตัวแก้ไข (ใส่เมื่อ action=edit เท่านั้น มิฉะนั้นใส่ null)\"\n"
+            "}"
+        )
 
     user_parts = [f"คำสั่ง/คำถาม: {contextual_query}"]
     if context_text:
@@ -191,8 +218,9 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
     ]
 
     # ── Step 3: Call API ───────────────────────────────────────────────────────
+    api_max_tokens = 12000 if research_mode else 3000
     try:
-        raw, ri, ro = _call_api(messages, api_key, max_tokens=3000, temperature=0.3)
+        raw, ri, ro = _call_api(messages, api_key, max_tokens=api_max_tokens, temperature=0.3)
         total_input += ri
         total_output += ro
     except requests.HTTPError as e:
@@ -207,19 +235,28 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
         raise ValueError(f"❌ Request failed: {e}")
 
     # ── Step 4: Parse structured response ─────────────────────────────────────
+    # Extract <think> blocks from raw response before JSON parsing
+    think_matches = re.findall(r'<think>.*?</think>', raw, re.DOTALL)
+    think_prefix = '\n'.join(think_matches).strip()
+
     parsed = _extract_json(raw)
     if parsed is None:
         # Fallback: treat raw response as a plain chat reply
-        response_text = _THINK_RE.sub('', raw).strip()
-        if not has_context and not response_text.startswith("⚠️"):
-            response_text = _PARAMETRIC_WARNING + "\n\n" + response_text
+        answer_text = _THINK_RE.sub('', raw).strip()
+        if not has_context and not answer_text.startswith("⚠️"):
+            answer_text = _PARAMETRIC_WARNING + "\n\n" + answer_text
+        # Re-attach think blocks so app.py can display them
+        response_text = (think_prefix + "\n\n" + answer_text).strip() if think_prefix else answer_text
         return "chat", response_text, None, total_input, total_output
 
     action = str(parsed.get("action", "chat")).lower()
-    if action not in ("chat", "edit"):
-        action = "chat"
+    if action not in ("chat", "edit", "research"):
+        action = "research" if research_mode else "chat"
 
     response_text = str(parsed.get("response", "")).strip()
+    # Re-attach think blocks so app.py can display them
+    if think_prefix:
+        response_text = (think_prefix + "\n\n" + response_text).strip()
 
     new_editor = parsed.get("editor_content")
     if isinstance(new_editor, str):
@@ -231,8 +268,8 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
     if not has_context and response_text and not response_text.startswith("⚠️"):
         response_text = _PARAMETRIC_WARNING + "\n\n" + response_text
 
-    # edit action must deliver content; demote to chat otherwise
-    if action == "edit" and not new_editor:
+    # edit/research action must deliver content; demote to chat otherwise
+    if action in ("edit", "research") and not new_editor:
         action = "chat"
 
     return action, response_text, new_editor, total_input, total_output
