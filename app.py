@@ -339,8 +339,31 @@ def main():
         margin-bottom: 0.5rem;
         color: #1f2937;
     }
-    div[data-testid="stVerticalBlock"] > div:has(> .your-work-panel) {
-        border-right: 1px solid #e5e7eb;
+
+    /* ── Sidebar: push content down to align with main panel ── */
+    section[data-testid="stSidebar"] > div:first-child {
+        padding-top: 1.5rem;
+    }
+    section[data-testid="stSidebar"] .stMarkdown h3 {
+        margin-top: 0;
+        margin-bottom: 0.4rem;
+    }
+
+    /* ── Compact buttons: reduce gap between button rows ── */
+    div[data-testid="stColumns"] + div[data-testid="stColumns"] {
+        margin-top: -0.5rem;
+    }
+
+    /* ── Editor toolbar buttons: smaller, uniform look ── */
+    .stButton > button {
+        font-size: 0.85rem;
+        padding-top: 0.35rem;
+        padding-bottom: 0.35rem;
+    }
+    .stDownloadButton > button {
+        font-size: 0.85rem;
+        padding-top: 0.35rem;
+        padding-bottom: 0.35rem;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -349,7 +372,13 @@ def main():
     # SIDEBAR — Documents + Notes tabs
     # ============================================================================
     with st.sidebar:
-        st.markdown("### 🔬 Research Workbench")
+        st.markdown("""
+        <div style="
+            font-size: 1.35rem; font-weight: 700;
+            padding: 0.25rem 0 0.6rem 0;
+            color: #1f2937;
+        ">🔬 Research Workbench</div>
+        """, unsafe_allow_html=True)
         sidebar_tab_docs, sidebar_tab_notes = st.tabs(["📄 Documents", "📝 Notes"])
 
         # ── Tab 1: Documents ──────────────────────────────────────────────────
@@ -541,7 +570,10 @@ def main():
 
     # ── Center: Your Work ─────────────────────────────────────────────────────
     with col_center:
-        st.markdown("## ✍️ Your Work")
+        st.markdown("""
+        <div style="font-size:1.35rem;font-weight:700;color:#1f2937;padding:0.25rem 0 0.4rem 0;">
+            ✍️ Your Work
+        </div>""", unsafe_allow_html=True)
 
         work_title = st.text_input(
             "Title",
@@ -561,37 +593,18 @@ def main():
         if current_file:
             st.caption(f"📄 `{os.path.basename(current_file)}`")
 
-        btn_save, btn_save_as, btn_load_open = st.columns([1, 1, 1])
-        with btn_save:
+        # ── Row 1: File actions ────────────────────────────────────────────
+        c_save, c_saveas, c_load, c_export, c_import = st.columns(5)
+        with c_save:
             save_clicked = st.button("💾 Save", type="primary",
                                      key="save_work_btn", use_container_width=True)
-        with btn_save_as:
-            save_as_clicked = st.button("💾 Save As", type="secondary",
+        with c_saveas:
+            save_as_clicked = st.button("📑 Save As",
                                         key="save_as_work_btn", use_container_width=True)
-        with btn_load_open:
-            load_work_clicked = st.button("📂 Load", type="secondary",
+        with c_load:
+            load_work_clicked = st.button("📂 Load",
                                           key="load_work_btn", use_container_width=True)
-
-        btn_undo, btn_redo = st.columns([1, 1])
-        with btn_undo:
-            undo_clicked = st.button(
-                "↩️ Undo Editing",
-                key="ai_undo_btn",
-                use_container_width=True,
-                disabled=not st.session_state.ai_edit_undo_stack,
-                help="Undo the last AI edit",
-            )
-        with btn_redo:
-            redo_clicked = st.button(
-                "↪️ Redo Editing",
-                key="ai_redo_btn",
-                use_container_width=True,
-                disabled=not st.session_state.ai_edit_redo_stack,
-                help="Redo the last undone AI edit",
-            )
-
-        btn_export, btn_import, btn_clear = st.columns([1, 1, 1])
-        with btn_export:
+        with c_export:
             export_data = (
                 f"TITLE: {work_title}\n---\n{work_content}"
                 if (work_title.strip() and work_content.strip()) else ""
@@ -608,11 +621,30 @@ def main():
                 use_container_width=True,
                 disabled=not export_data,
             )
-        with btn_import:
-            import_clicked = st.button("📥 Import", type="secondary",
+        with c_import:
+            import_clicked = st.button("📥 Import",
                                        key="import_work_btn", use_container_width=True)
-        with btn_clear:
-            clear_editor_clicked = st.button("🗑️ Clear", type="secondary",
+
+        # ── Row 2: Edit actions ───────────────────────────────────────────
+        c_undo, c_redo, c_clear = st.columns(3)
+        with c_undo:
+            undo_clicked = st.button(
+                "↩️ Undo",
+                key="ai_undo_btn",
+                use_container_width=True,
+                disabled=not st.session_state.ai_edit_undo_stack,
+                help="Undo the last AI edit",
+            )
+        with c_redo:
+            redo_clicked = st.button(
+                "↪️ Redo",
+                key="ai_redo_btn",
+                use_container_width=True,
+                disabled=not st.session_state.ai_edit_redo_stack,
+                help="Redo the last undone AI edit",
+            )
+        with c_clear:
+            clear_editor_clicked = st.button("🗑️ Clear",
                                              key="clear_editor_btn", use_container_width=True)
 
         # ── Button logic ───────────────────────────────────────────────────────
@@ -778,7 +810,10 @@ def main():
 
     # ── Right: Assistant Chat ─────────────────────────────────────────────────
     with col_right:
-        st.markdown("## 🤖 Assistant")
+        st.markdown("""
+        <div style="font-size:1.35rem;font-weight:700;color:#1f2937;padding:0.25rem 0 0.4rem 0;">
+            🤖 Assistant
+        </div>""", unsafe_allow_html=True)
 
         doc_store = st.session_state.doc_vector_store
         note_store = st.session_state.note_vector_store
