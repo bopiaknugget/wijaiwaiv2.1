@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-DB_PATH = Path(__file__).parent / "research_notes.db"
+DB_PATH = Path(__file__).parent / "Database" / "research_notes.db"
 
 
 @contextmanager

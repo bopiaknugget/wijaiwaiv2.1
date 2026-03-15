@@ -239,12 +239,22 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
     think_matches = re.findall(r'<think>.*?</think>', raw, re.DOTALL)
     think_prefix = '\n'.join(think_matches).strip()
 
-    parsed = _extract_json(raw)
+    # Strip <think> tags BEFORE attempting JSON parse so they don't interfere
+    raw_clean = _THINK_RE.sub('', raw).strip()
+
+    parsed = _extract_json(raw_clean)
     if parsed is None:
-        # Fallback: treat raw response as a plain chat reply
-        answer_text = _THINK_RE.sub('', raw).strip()
+        answer_text = raw_clean
         if not has_context and not answer_text.startswith("⚠️"):
             answer_text = _PARAMETRIC_WARNING + "\n\n" + answer_text
+
+        # Research mode fallback: even if JSON fails, push content to editor
+        if research_mode and answer_text:
+            response_text = "🔬 ผลการค้นคว้าถูกส่งไปยัง Research Workbench แล้ว"
+            if think_prefix:
+                response_text = (think_prefix + "\n\n" + response_text).strip()
+            return "research", response_text, answer_text, total_input, total_output
+
         # Re-attach think blocks so app.py can display them
         response_text = (think_prefix + "\n\n" + answer_text).strip() if think_prefix else answer_text
         return "chat", response_text, None, total_input, total_output
@@ -263,6 +273,14 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
         new_editor = new_editor.strip() or None
     elif new_editor is not None:
         new_editor = None  # discard non-string values (e.g. null/None already fine)
+
+    # Research mode safety net: if LLM didn't provide editor_content,
+    # use response text as editor content so it doesn't get lost in chat
+    if research_mode and not new_editor and response_text:
+        clean_response = _THINK_RE.sub('', response_text).strip()
+        if clean_response:
+            new_editor = clean_response
+            action = "research"
 
     # Python-level safety net: always prepend warning when no RAG context was available
     if not has_context and response_text and not response_text.startswith("⚠️"):

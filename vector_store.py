@@ -22,7 +22,7 @@ import database
 
 # ── Default unified collection name ──────────────────────────────────────────
 UNIFIED_COLLECTION = "unified"
-UNIFIED_DB_PATH = "./unified_chroma_db"
+UNIFIED_DB_PATH = "./Database/unified_chroma_db"
 
 
 @st.cache_resource

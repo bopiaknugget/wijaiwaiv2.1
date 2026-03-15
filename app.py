@@ -42,7 +42,7 @@ from vector_store import (
 
 
 _THINK_PATTERN = re.compile(r'<think>(.*?)</think>', re.DOTALL)
-WORK_DIR = os.path.join(os.path.dirname(__file__), "your_work")
+WORK_DIR = os.path.join(os.path.dirname(__file__), "user_data")
 
 
 # ── File helpers ───────────────────────────────────────────────────────────────
@@ -286,7 +286,10 @@ def main():
     # ── Session state defaults ─────────────────────────────────────────────────
     defaults = {
         "unified_vector_store": None,   # Single unified ChromaDB for docs + notes
-        "processed_docs": [],           # [{"name": str, "chunks": int}]
+        "processed_docs": [              # Restored from SQLite on startup
+            {"name": d["filename"], "chunks": d["chunk_count"], "doc_id": d["id"]}
+            for d in database.load_all_documents()
+        ],
         "messages": [],
         "total_tokens": 0,
         "total_cost_thb": 0.0,
@@ -561,12 +564,27 @@ def main():
                                     documents, uploaded_file.name
                                 )
 
+                                # Save document metadata to SQLite
+                                doc_id = database.save_document_metadata(
+                                    filename=uploaded_file.name,
+                                    file_type=ext.lstrip('.'),
+                                    chunk_count=len(child_chunks),
+                                    db_path=UNIFIED_DB_PATH,
+                                )
+                                # Inject doc_id into child chunk metadata
+                                for chunk in child_chunks:
+                                    chunk.metadata['doc_id'] = doc_id
+                                if summary_docs:
+                                    for sdoc in summary_docs:
+                                        sdoc.metadata['doc_id'] = doc_id
+
                                 all_child_chunks.extend(child_chunks)
                                 all_parent_records.extend(parent_records)
                                 all_summary_docs.extend(summary_docs)
                                 new_doc_entries.append({
                                     "name": uploaded_file.name,
-                                    "chunks": len(child_chunks)
+                                    "chunks": len(child_chunks),
+                                    "doc_id": doc_id,
                                 })
                                 os.unlink(tmp_path)
                             except Exception as e:
@@ -624,6 +642,9 @@ def main():
                                     st.error(f"VectorDB delete error: {e}")
                             # Remove parent chunks from SQLite
                             database.delete_parent_chunks_by_source(doc_entry["name"])
+                            # Remove document metadata from SQLite
+                            if doc_entry.get("doc_id"):
+                                database.delete_document_by_id(doc_entry["doc_id"])
                             # Remove from tracking list immediately
                             st.session_state.processed_docs = [
                                 d for d in st.session_state.processed_docs

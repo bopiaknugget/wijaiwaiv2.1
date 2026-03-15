@@ -7,7 +7,7 @@ Modes:
   --query  QUERY_TEXT Retrieve documents and generate an AI answer
 
 Optional:
-  --db  DB_PATH  ChromaDB directory (default: ./chroma_db)
+  --db  DB_PATH  ChromaDB directory (default: ./Database/chroma_db)
   --k   K        Top-k results for retrieval (default: 3)
 """
 
@@ -29,7 +29,7 @@ from generator import generate_answer, print_generated_answer
 # INGEST MODE
 # ============================================================================
 
-def ingest_mode(pdf_path: str, db_path: str = "./chroma_db"):
+def ingest_mode(pdf_path: str, db_path: str = "./Database/chroma_db"):
     """
     Load a PDF, chunk it, embed, and store in ChromaDB.
     If the DB already exists, new chunks are appended (no re-embedding of old data).
@@ -70,7 +70,7 @@ def ingest_mode(pdf_path: str, db_path: str = "./chroma_db"):
 # QUERY MODE
 # ============================================================================
 
-def query_mode(query_text: str, db_path: str = "./chroma_db", k: int = 3):
+def query_mode(query_text: str, db_path: str = "./Database/chroma_db", k: int = 3):
     """
     Load an existing ChromaDB and run MMR retrieval + AI answer generation.
     Uses Maximal Marginal Relevance to return diverse, high-quality context.
@@ -147,8 +147,8 @@ Examples:
     )
     parser.add_argument(
         "--db",
-        type=str, default="./chroma_db", metavar="DB_PATH",
-        help="ChromaDB storage directory (default: ./chroma_db)"
+        type=str, default="./Database/chroma_db", metavar="DB_PATH",
+        help="ChromaDB storage directory (default: ./Database/chroma_db)"
     )
     parser.add_argument(
         "--k",

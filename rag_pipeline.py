@@ -107,7 +107,7 @@ def initialize_embeddings() -> HuggingFaceEmbeddings:
 # ============================================================================
 
 def create_vector_store(chunked_documents: list, embeddings,
-                        db_path: str = "./chroma_db") -> Chroma:
+                        db_path: str = "./Database/chroma_db") -> Chroma:
     """
     Create a ChromaDB vector store from chunked documents.
     Chroma v0.4+ auto-persists to disk — no manual .persist() call needed.
@@ -191,7 +191,7 @@ def main():
 
     # ── Configuration ──────────────────────────────────────────────────────────
     pdf_path = "data/paper.pdf"          # ← edit as needed
-    db_path = "./chroma_db"
+    db_path = "./Database/chroma_db"
     test_query = "What is the main topic of this document?"
 
     try:

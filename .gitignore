@@ -14,12 +14,7 @@ ENV/
 .virtualenv/
 
 # Local vector database (ChromaDB)
-chroma_db/
-chroma/
-notes_chroma_db/
-temp_chroma_db_ff2881f3/
-your_work/
-
+Database/
 
 # Python bytecode and cache files
 __pycache__/
