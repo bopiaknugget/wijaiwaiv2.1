@@ -27,6 +27,8 @@ from document_loader import (
     enrich_metadata, create_parent_child_chunks, create_summary_documents,
 )
 from generator import generate_answer, generate_selection_edit
+from reviewer import review_research
+from web_scraper import scrape_url, summarize_content, generate_title, prepare_web_chunks
 from vector_store import (
     initialize_embeddings,
     get_or_create_vector_store,
@@ -107,6 +109,76 @@ def display_assistant_message(content: str):
     st.write(answer)
 
 
+# ── Advisor review renderer ──────────────────────────────────────────────────
+
+_REVIEW_TAG_STYLES = {
+    "ต้องแก้ไข": {
+        "bg": "#fef2f2", "border": "#fca5a5", "color": "#991b1b",
+        "icon": "🔴", "label": "ต้องแก้ไข",
+    },
+    "ดีแล้ว": {
+        "bg": "#f0fdf4", "border": "#86efac", "color": "#166534",
+        "icon": "🟢", "label": "ดีแล้ว",
+    },
+    "คำแนะนำ": {
+        "bg": "#fffbeb", "border": "#fcd34d", "color": "#92400e",
+        "icon": "🟡", "label": "คำแนะนำ",
+    },
+}
+
+_REVIEW_TAG_RE = re.compile(
+    r'\[(ต้องแก้ไข|ดีแล้ว|คำแนะนำ)\]',
+)
+
+
+def _render_review_result(review_text: str):
+    """Render advisor review with color-coded blocks."""
+    import html as _html
+    lines = review_text.split('\n')
+    current_tag = None
+    current_lines = []
+
+    def _flush():
+        nonlocal current_tag, current_lines
+        content = _html.escape('\n'.join(current_lines).strip()).replace('\n', '<br>')
+        if not content:
+            current_lines = []
+            return
+        if current_tag and current_tag in _REVIEW_TAG_STYLES:
+            s = _REVIEW_TAG_STYLES[current_tag]
+            st.markdown(
+                f'<div style="background:{s["bg"]};border-left:4px solid {s["border"]};'
+                f'border-radius:8px;padding:10px 14px;margin:6px 0;'
+                f'color:{s["color"]};font-size:0.92rem;line-height:1.6;">'
+                f'<strong>{s["icon"]} [{s["label"]}]</strong> '
+                f'{content}</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            # General text (overview / summary)
+            st.markdown(
+                f'<div style="background:#f8fafc;border-radius:8px;'
+                f'padding:10px 14px;margin:6px 0;color:#334155;'
+                f'font-size:0.92rem;line-height:1.6;">{content}</div>',
+                unsafe_allow_html=True,
+            )
+        current_lines = []
+
+    for line in lines:
+        m = _REVIEW_TAG_RE.search(line)
+        if m:
+            _flush()
+            current_tag = m.group(1)
+            # Remove the tag from the line text, keep the rest
+            cleaned = _REVIEW_TAG_RE.sub('', line).strip(' -—:')
+            if cleaned:
+                current_lines.append(cleaned)
+        else:
+            current_lines.append(line)
+
+    _flush()
+
+
 # ── Unified vector-store helpers ──────────────────────────────────────────────
 
 def _load_unified_vector_store(embeddings):
@@ -117,6 +189,87 @@ def _load_unified_vector_store(embeddings):
         embeddings=embeddings,
         collection_name=UNIFIED_COLLECTION,
     )
+
+
+# ============================================================================
+# Web Edit Dialog — แก้ไขชื่อเว็บเพจ + อัปเดต ChromaDB metadata
+# ============================================================================
+
+@st.dialog("แก้ไขชื่อ")
+def _show_web_edit_dialog(web_page_id: int):
+    """Pop-up สำหรับแก้ไขชื่อเว็บเพจ"""
+    wp = database.get_web_page_by_id(web_page_id)
+    if wp is None:
+        st.error("ไม่พบข้อมูลนี้")
+        if st.button("ปิด", key="web_edit_close_err"):
+            del st.session_state._web_edit_id
+            st.rerun()
+        return
+
+    st.caption(f"🔗 {wp['url']}")
+
+    edit_title = st.text_input(
+        "ชื่อ",
+        value=wp['title'],
+        key="web_edit_dialog_title"
+    )
+
+    col_save, col_cancel = st.columns(2)
+    with col_save:
+        save_clicked = st.button(
+            "บันทึก", type="primary",
+            key="web_edit_dialog_save",
+            use_container_width=True
+        )
+    with col_cancel:
+        cancel_clicked = st.button(
+            "ยกเลิก",
+            key="web_edit_dialog_cancel",
+            use_container_width=True
+        )
+
+    if cancel_clicked:
+        del st.session_state._web_edit_id
+        st.rerun()
+
+    if save_clicked:
+        if not edit_title.strip():
+            st.warning("กรุณาระบุชื่อ")
+            return
+
+        with st.spinner("กำลังบันทึก..."):
+            try:
+                # อัปเดตชื่อใน SQLite
+                database.update_web_page_title(web_page_id, edit_title.strip())
+
+                # อัปเดต paper_title ใน ChromaDB metadata
+                if st.session_state.unified_vector_store is not None:
+                    collection = st.session_state.unified_vector_store._collection
+                    try:
+                        results = collection.get(
+                            where={"web_page_id": web_page_id},
+                            include=["metadatas"]
+                        )
+                    except Exception:
+                        results = collection.get(
+                            where={"doc_name": wp['url']},
+                            include=["metadatas"]
+                        )
+                    if results and results['ids']:
+                        updated = []
+                        for meta in results['metadatas']:
+                            meta['paper_title'] = edit_title.strip()
+                            updated.append(meta)
+                        collection.update(
+                            ids=results['ids'],
+                            metadatas=updated
+                        )
+
+                del st.session_state._web_edit_id
+                st.rerun()
+
+            except Exception as e:
+                st.error(f"เกิดข้อผิดพลาด: {str(e)}")
 
 
 # ============================================================================
@@ -151,6 +304,8 @@ def main():
         "_research_mode": False,
         "ai_edit_undo_stack": [],   # list of editor content snapshots (before AI edits)
         "ai_edit_redo_stack": [],   # list of editor content snapshots (after undone AI edits)
+        "review_result": None,      # latest advisor review output text
+        "review_expanded": True,    # whether review result is expanded
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -350,7 +505,14 @@ def main():
     # SIDEBAR — Documents + Notes tabs
     # ============================================================================
     with st.sidebar:
-        sidebar_tab_docs, sidebar_tab_notes = st.tabs(["📄 Documents", "📝 Notes"])
+        st.markdown("""
+        <div style="font-size:1.35rem;font-weight:700;color:#1f2937;padding:0.25rem 0 0.4rem 0;">
+            📚 แหล่งข้อมูล
+        </div>""", unsafe_allow_html=True)
+
+        sidebar_tab_docs, sidebar_tab_notes, sidebar_tab_web = st.tabs(
+            ["📄 Documents", "📝 Notes", "🌐 Web"]
+        )
 
         # ── Tab 1: Documents ──────────────────────────────────────────────────
         with sidebar_tab_docs:
@@ -545,6 +707,137 @@ def main():
                         )
             else:
                 st.info("No notes saved yet.")
+
+        # ── Tab 3: Web ─────────────────────────────────────────────────────
+        with sidebar_tab_web:
+            st.markdown("**เพิ่มข้อมูลจากเว็บ**")
+            web_url_input = st.text_input(
+                "ลิงก์เว็บไซต์",
+                placeholder="วาง URL ที่นี่ เช่น https://...",
+                key="web_url_input",
+                label_visibility="collapsed"
+            )
+
+            scrape_clicked = st.button(
+                "🔍 ดึงข้อมูลจาก web เข้าฐานข้อมูล",
+                type="primary",
+                key="scrape_btn",
+                use_container_width=True,
+                disabled=not web_url_input.strip()
+            )
+
+            if scrape_clicked and web_url_input.strip():
+                total_input_tokens = 0
+                total_output_tokens = 0
+
+                with st.status("กำลังดึงข้อมูล...", expanded=True) as status:
+                    st.write("กำลังเปิดหน้าเว็บ...")
+                    scrape_result = scrape_url(web_url_input.strip())
+
+                    if not scrape_result['success']:
+                        status.update(label="ไม่สำเร็จ", state="error")
+                        st.error(scrape_result['error'])
+                    else:
+                        web_content = scrape_result['content']
+                        st.write("กำลังอ่านและสรุปเนื้อหา...")
+                        summary_result = summarize_content(web_content)
+
+                        if not summary_result['success']:
+                            status.update(label="ไม่สำเร็จ", state="error")
+                            st.error(summary_result['error'])
+                        else:
+                            summary_text = summary_result['summary']
+                            total_input_tokens += summary_result['input_tokens']
+                            total_output_tokens += summary_result['output_tokens']
+
+                            st.write("กำลังตั้งชื่อ...")
+                            title_result = generate_title(web_content)
+                            if title_result['success']:
+                                auto_title = title_result['title']
+                                total_input_tokens += title_result['input_tokens']
+                                total_output_tokens += title_result['output_tokens']
+                            else:
+                                auto_title = web_content[:60].replace('\n', ' ').strip()
+
+                            st.write("กำลังบันทึกลงฐานข้อมูล...")
+                            try:
+                                web_page_id = database.save_web_page(
+                                    url=scrape_result['url'],
+                                    title=auto_title,
+                                    summary=summary_text,
+                                    chunk_count=0,
+                                )
+
+                                child_chunks, parent_records = prepare_web_chunks(
+                                    summary_text, auto_title,
+                                    scrape_result['url'],
+                                    web_page_id=web_page_id,
+                                )
+
+                                if st.session_state.unified_vector_store is None:
+                                    st.session_state.unified_vector_store = get_or_create_vector_store(
+                                        db_path=UNIFIED_DB_PATH,
+                                        embeddings=embeddings,
+                                        collection_name=UNIFIED_COLLECTION,
+                                    )
+
+                                ingest_documents(
+                                    st.session_state.unified_vector_store,
+                                    child_chunks,
+                                    parent_records,
+                                )
+
+                                database.update_web_page(
+                                    web_page_id, auto_title, summary_text,
+                                    chunk_count=len(child_chunks),
+                                )
+
+                                total_tokens_turn = total_input_tokens + total_output_tokens
+                                cost_thb = (total_tokens_turn / 1_000_000) * 0.4 * 35
+                                st.session_state.total_tokens += total_tokens_turn
+                                st.session_state.total_cost_thb += cost_thb
+
+                                status.update(label="เสร็จสิ้น", state="complete")
+                                st.success(f"บันทึกแล้ว — **{auto_title}**")
+                            except Exception as e:
+                                status.update(label="ไม่สำเร็จ", state="error")
+                                st.error(f"เกิดข้อผิดพลาด: {str(e)}")
+
+            # ── รายการเว็บที่บันทึกไว้ ──
+            web_pages = database.load_all_web_pages()
+            if web_pages:
+                st.divider()
+                st.caption(f"เว็บที่บันทึกไว้ ({len(web_pages)})")
+
+                for wp in web_pages:
+                    col_info, col_edit, col_del = st.columns([4, 1, 1])
+                    with col_info:
+                        st.markdown(f"🌐 **{wp['title']}**")
+                        st.caption(wp['timestamp'])
+                    with col_edit:
+                        if st.button("✏️", key=f"edit_web_{wp['id']}",
+                                     help="แก้ไขชื่อ"):
+                            st.session_state._web_edit_id = wp['id']
+                            st.rerun()
+                    with col_del:
+                        if st.button("🗑️", key=f"del_web_{wp['id']}",
+                                     help="ลบออก"):
+                            if st.session_state.unified_vector_store is not None:
+                                try:
+                                    st.session_state.unified_vector_store \
+                                        ._collection.delete(
+                                            where={"doc_name": wp['url']}
+                                        )
+                                except Exception:
+                                    pass
+                            database.delete_parent_chunks_by_source(wp['url'])
+                            database.delete_web_page_by_id(wp['id'])
+                            st.rerun()
+
+            # ── Pop-up แก้ไขชื่อ ──
+            _web_edit_id = st.session_state.get("_web_edit_id")
+            if _web_edit_id is not None:
+                _show_web_edit_dialog(_web_edit_id)
 
 
     # ============================================================================
@@ -777,6 +1070,18 @@ def main():
 
         st.divider()
 
+        # ── Advisor Review Result (below editor) ─────────────────────────────
+        if st.session_state.review_result:
+            with st.expander("🎓 ผลการตรวจจากอาจารย์ที่ปรึกษา",
+                             expanded=st.session_state.review_expanded):
+                _render_review_result(st.session_state.review_result)
+                if st.button("🗑️ ล้างผลตรวจ", key="clear_review_btn",
+                             use_container_width=True):
+                    st.session_state.review_result = None
+                    st.rerun()
+
+        st.divider()
+
         # ── Session usage stats ────────────────────────────────────────────────
         with st.expander("📈 Session Usage", expanded=False):
             c1, c2, c3 = st.columns(3)
@@ -869,6 +1174,9 @@ def main():
                     "📄 Upload documents or save a note for RAG-based answers.\n\n"
                     "💡 พิมพ์ `/research` ก่อนคำถามเพื่อเข้าสู่โหมดค้นคว้าเชิงลึก"
                 )
+
+        # Placeholder for spinner — sits right below chat container, above chat input
+        _chat_spinner_area = st.empty()
 
         # ── Tab-autocomplete JS: /r → /research ──────────────────────────
         import streamlit.components.v1 as components
@@ -1031,6 +1339,62 @@ def main():
             st.session_state.total_cost_thb = 0.0
             st.rerun()
 
+        # ── Advisor Review Section ────────────────────────────────────────
+        st.markdown("""
+        <div style="
+            margin-top: 16px;
+            padding: 14px 16px 10px 16px;
+            background: linear-gradient(135deg, #fef9ef 0%, #fdf2f8 100%);
+            border: 1.5px solid #f59e0b;
+            border-radius: 12px;
+        ">
+            <div style="font-size: 1.05rem; font-weight: 700; color: #92400e; margin-bottom: 6px;">
+                🎓 Advisor — ตรวจงานวิจัย
+            </div>
+            <div style="font-size: 0.8rem; color: #78716c; margin-bottom: 4px;">
+                อาจารย์ที่ปรึกษา AI จะ review งานใน Research Workbench
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown('<div style="margin-top:10px;"></div>', unsafe_allow_html=True)
+
+        review_focus = ""
+        with st.expander("💬 อยากตรวจอะไรเป็นพิเศษ? (optional)", expanded=False):
+            review_focus = st.text_input(
+                "ระบุสิ่งที่อยากให้เน้น review",
+                value="",
+                placeholder="เช่น ตรวจบทที่ 2, ดูการอ้างอิง, ตรวจระเบียบวิธี...",
+                key="review_focus_input",
+                label_visibility="collapsed",
+            )
+
+        st.markdown('<div style="margin-top:6px;"></div>', unsafe_allow_html=True)
+
+        if st.button("🎓 ส่งให้อาจารย์ตรวจ", type="primary",
+                     key="advisor_review_btn", use_container_width=True):
+            # Read from the actual widget value (work_content from col_center),
+            # NOT from work_content_val which is only updated by AI edits.
+            editor_text = st.session_state.get("work_content_input", "")
+            if not editor_text or not editor_text.strip():
+                st.warning("⚠️ ไม่มีเนื้อหาใน Research Workbench ให้ตรวจ")
+            else:
+                with st.spinner("🎓 อาจารย์กำลังตรวจงาน..."):
+                    try:
+                        review_text, ri, ro = review_research(
+                            editor_text,
+                            user_focus=review_focus,
+                        )
+                        total_tokens_turn = ri + ro
+                        cost_thb = (total_tokens_turn / 1_000_000) * 0.4 * 35
+                        st.session_state.total_tokens += total_tokens_turn
+                        st.session_state.total_cost_thb += cost_thb
+                        st.session_state.review_result = review_text
+                        st.session_state.review_expanded = True
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ เกิดข้อผิดพลาด: {str(e)}")
+
         if prompt:
             # ── Detect content edit command from right-click overlay ──────
             if prompt.startswith("__EDIT__"):
@@ -1044,7 +1408,7 @@ def main():
                         "content": f"✏️ แก้ไขข้อความ: {instruction}",
                     })
 
-                    with st.spinner("✏️ กำลังแก้ไขข้อความที่เลือก..."):
+                    with _chat_spinner_area, st.spinner("✏️ กำลังแก้ไขข้อความที่เลือก..."):
                         edited, ri, ro = generate_selection_edit(
                             selected, instruction
                         )
@@ -1102,7 +1466,7 @@ def main():
             })
 
             spinner_text = "🔬 กำลังค้นคว้าเชิงลึก..." if is_research else "Analyzing..."
-            with st.spinner(spinner_text):
+            with _chat_spinner_area, st.spinner(spinner_text):
                 try:
                     chat_history = st.session_state.messages[:-1]
 

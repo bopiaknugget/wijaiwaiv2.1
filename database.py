@@ -74,6 +74,18 @@ def initialize_database():
             )
         ''')
 
+        # ตาราง web_pages สำหรับเก็บข้อมูลเว็บที่ scrape มา
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS web_pages (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                url         TEXT NOT NULL,
+                title       TEXT NOT NULL,
+                summary     TEXT NOT NULL,
+                chunk_count INTEGER DEFAULT 0,
+                timestamp   DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         conn.commit()
 
 
@@ -214,6 +226,95 @@ def delete_parent_chunks_by_source(source_file: str) -> int:
         cursor.execute('DELETE FROM parent_chunks WHERE source_file = ?', (source_file,))
         conn.commit()
         return cursor.rowcount
+
+
+# ── Web Pages ──────────────────────────────────────────────────────────────────
+
+def save_web_page(url: str, title: str, summary: str, chunk_count: int = 0) -> int:
+    """บันทึกข้อมูลเว็บเพจ Returns new web_page ID."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'INSERT INTO web_pages (url, title, summary, chunk_count) VALUES (?, ?, ?, ?)',
+            (url, title, summary, chunk_count)
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+
+def load_all_web_pages() -> list:
+    """โหลดรายการเว็บเพจทั้งหมด เรียงจากใหม่ไปเก่า"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT id, url, title, summary, chunk_count, timestamp '
+            'FROM web_pages ORDER BY timestamp DESC'
+        )
+        return [
+            {
+                'id': row[0], 'url': row[1], 'title': row[2],
+                'summary': row[3], 'chunk_count': row[4], 'timestamp': row[5]
+            }
+            for row in cursor.fetchall()
+        ]
+
+
+def delete_web_page_by_id(page_id: int) -> bool:
+    """ลบเว็บเพจตาม ID Returns True ถ้าลบสำเร็จ"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM web_pages WHERE id = ?', (page_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def update_web_page_title(page_id: int, new_title: str) -> bool:
+    """อัปเดตชื่อ Title ของเว็บเพจ Returns True ถ้าอัปเดตสำเร็จ"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE web_pages SET title = ? WHERE id = ?',
+            (new_title, page_id)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def update_web_page(page_id: int, new_title: str, new_summary: str,
+                    chunk_count: int = None) -> bool:
+    """อัปเดต Title, Summary (และ chunk_count ถ้าระบุ) ของเว็บเพจ"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if chunk_count is not None:
+            cursor.execute(
+                'UPDATE web_pages SET title = ?, summary = ?, chunk_count = ? WHERE id = ?',
+                (new_title, new_summary, chunk_count, page_id)
+            )
+        else:
+            cursor.execute(
+                'UPDATE web_pages SET title = ?, summary = ? WHERE id = ?',
+                (new_title, new_summary, page_id)
+            )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def get_web_page_by_id(page_id: int) -> dict | None:
+    """ดึงข้อมูลเว็บเพจตาม ID"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT id, url, title, summary, chunk_count, timestamp '
+            'FROM web_pages WHERE id = ?',
+            (page_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return {
+                'id': row[0], 'url': row[1], 'title': row[2],
+                'summary': row[3], 'chunk_count': row[4], 'timestamp': row[5]
+            }
+        return None
 
 
 # Initialize database on import (idempotent — CREATE TABLE IF NOT EXISTS)

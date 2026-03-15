@@ -28,3 +28,7 @@ python-dotenv>=1.0.0
 
 # HTTP Requests
 requests>=2.31.0
+
+# Web Scraping
+trafilatura>=1.6.0
+beautifulsoup4>=4.12.0
