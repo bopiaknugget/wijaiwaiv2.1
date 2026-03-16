@@ -14,8 +14,8 @@ ENV/
 .virtualenv/
 
 #user saved files
-/user_data/*
-!/user_data/.gitkeep
+user_data/*
+!user_data/.gitkeep
 
 #prompts
 /md
