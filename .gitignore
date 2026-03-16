@@ -18,7 +18,7 @@ user_data/*
 !user_data/.gitkeep
 
 #prompts
-/md
+md/
 
 # Local vector database (ChromaDB)
 Database/
