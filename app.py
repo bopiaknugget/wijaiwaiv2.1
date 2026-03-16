@@ -278,9 +278,13 @@ def _show_web_edit_dialog(web_page_id: int):
 # ============================================================================
 
 def main():
+    from PIL import Image as _PILImage
+    _logo_img = _PILImage.open(
+        os.path.join(os.path.dirname(__file__), "pic", "logo.jpeg")
+    )
     st.set_page_config(
-        page_title="🔬 Research Workbench",
-        page_icon="📚",
+        page_title="WijaiWai",
+        page_icon=_logo_img,
         layout="wide"
     )
 
@@ -315,48 +319,41 @@ def main():
         if k not in st.session_state:
             st.session_state[k] = v
 
+    # ── Banner image (used by splash, loading, and top banner) ──────────────
+    import base64, pathlib
+    _banner_path = pathlib.Path(__file__).parent / "pic" / "banner.jpeg"
+    _b64 = base64.b64encode(_banner_path.read_bytes()).decode()
+
     # ── Loading screen (first run only) ───────────────────────────────────────
     if not st.session_state._app_initialized:
+
         # ── Splash screen: Logo + App name ────────────────────────────────
         splash = st.empty()
         with splash.container():
-            st.markdown("""
+            st.markdown(f"""
             <style>
-            @keyframes pulseGlow {
-                0%, 100% { opacity: 1; transform: scale(1); filter: drop-shadow(0 0 0px rgba(102,126,234,0)); }
-                50% { opacity: 0.6; transform: scale(1.08); filter: drop-shadow(0 0 18px rgba(102,126,234,0.5)); }
-            }
-            @keyframes fadeInUp {
-                from { opacity: 0; transform: translateY(24px); }
-                to { opacity: 1; transform: translateY(0); }
-            }
-            .splash-screen {
+            @keyframes fadeIn {{
+                from {{ opacity: 0; }}
+                to {{ opacity: 1; }}
+            }}
+            .splash-screen {{
                 display: flex;
-                flex-direction: column;
                 align-items: center;
                 justify-content: center;
                 min-height: 92vh;
-                text-align: center;
-                background: linear-gradient(160deg, #f8faff 0%, #f0f4ff 40%, #f5f0ff 100%);
+                background: #f8faff;
                 border-radius: 16px;
-            }
-            .splash-logo {
-                font-size: 6rem;
-                animation: pulseGlow 2s ease-in-out infinite;
-                margin-bottom: 1.2rem;
-            }
-            .splash-title {
-                font-size: 2.4rem;
-                font-weight: 800;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-                animation: fadeInUp 1s ease-out 0.3s both;
-            }
+                animation: fadeIn 0.8s ease-out both;
+            }}
+            .splash-banner {{
+                max-width: 100%;
+                max-height: 80vh;
+                object-fit: contain;
+                border-radius: 12px;
+            }}
             </style>
             <div class="splash-screen">
-                <div class="splash-logo">🔬</div>
-                <div class="splash-title">Research Workbench</div>
+                <img class="splash-banner" src="data:image/jpeg;base64,{_b64}" />
             </div>
             """, unsafe_allow_html=True)
 
@@ -367,47 +364,28 @@ def main():
         # ── Loading progress screen ──────────────────────────────────────
         loading = st.empty()
         with loading.container():
-            st.markdown("""
+            st.markdown(f"""
             <style>
-            @keyframes pulse {
-                0%, 100% { opacity: 1; }
-                50% { opacity: 0.4; }
-            }
-            .loading-screen {
+            @keyframes pulse {{
+                0%, 100% {{ opacity: 1; }}
+                50% {{ opacity: 0.4; }}
+            }}
+            .loading-screen {{
                 display: flex;
                 flex-direction: column;
                 align-items: center;
                 justify-content: center;
                 min-height: 80vh;
                 text-align: center;
-            }
-            .loading-icon {
-                font-size: 4rem;
-                animation: pulse 2s ease-in-out infinite;
-                margin-bottom: 1rem;
-            }
-            .loading-title {
-                font-size: 2rem;
-                font-weight: 700;
-                color: #1f2937;
-                margin-bottom: 0.5rem;
-            }
-            .loading-subtitle {
+            }}
+            .loading-subtitle {{
                 font-size: 1rem;
                 color: #6b7280;
                 margin-bottom: 2rem;
-            }
-            .loading-step {
-                font-size: 0.95rem;
-                color: #374151;
-                margin: 0.3rem 0;
-            }
-            .loading-step .done { color: #10b981; }
-            .loading-step .working { color: #3b82f6; animation: pulse 1.5s ease-in-out infinite; }
+            }}
             </style>
             <div class="loading-screen">
-                <div class="loading-icon">🔬</div>
-                <div class="loading-title">Research Workbench</div>
+                <img src="data:image/jpeg;base64,{_b64}" style="max-width:320px; border-radius:12px; margin-bottom:1rem;" />
                 <div class="loading-subtitle">กำลังเตรียมระบบ...</div>
             </div>
             """, unsafe_allow_html=True)
@@ -871,7 +849,7 @@ def main():
     with col_center:
         st.markdown("""
         <div style="font-size:1.35rem;font-weight:700;color:#1f2937;padding:0.25rem 0 0.4rem 0;">
-            🔬 Research Workbench
+            📝 Research Workbench
         </div>""", unsafe_allow_html=True)
 
         work_title = st.text_input(
@@ -1123,47 +1101,52 @@ def main():
 
     # ── Right: Assistant Chat ─────────────────────────────────────────────────
     with col_right:
-        st.markdown("""
-        <div style="font-size:1.35rem;font-weight:700;color:#1f2937;padding:0.25rem 0 0.4rem 0;">
-            🤖 Assistant
+        _logo_b64 = base64.b64encode(
+            pathlib.Path(__file__).parent.joinpath("pic", "logo.jpeg").read_bytes()
+        ).decode()
+        st.markdown(f"""
+        <div style="display:flex;align-items:center;gap:8px;padding:0.25rem 0 0.4rem 0;">
+            <img src="data:image/jpeg;base64,{_logo_b64}"
+                 style="height:28px;width:28px;border-radius:6px;object-fit:cover;" />
+            <span style="font-size:1.35rem;font-weight:700;color:#1f2937;">Assistant</span>
         </div>""", unsafe_allow_html=True)
 
         unified_store = st.session_state.unified_vector_store
         has_context = unified_store is not None
 
-        # ── Chat container (compact) ─────────────────────────────────────
-        chat_container = st.container(height=300)
-        with chat_container:
-            for message in st.session_state.messages:
-                with st.chat_message(message["role"]):
-                    if message["role"] == "assistant":
-                        if message.get("action") == "research":
-                            st.caption("🔬 Research — ผลลัพธ์อยู่ใน Research Workbench")
-                        elif message.get("action") == "edit":
-                            st.caption("✏️ แก้ไขเอกสารแล้ว")
-                        display_assistant_message(message["content"])
-                        if "tokens" in message:
-                            st.caption(
-                                f"⏱️ {message['tokens']} tokens "
-                                f"| ฿{message['cost_thb']:.4f}"
-                            )
-                        if "sources" in message:
-                            with st.expander("📚 แหล่งข้อมูล"):
-                                for i, doc in enumerate(message["sources"], 1):
-                                    src_type = doc.metadata.get("source", "doc")
-                                    label = (
-                                        "📝 Note" if src_type == "research_note"
-                                        else f"📄 Doc {i}"
-                                    )
-                                    st.markdown(f"**{label}:**")
-                                    preview = doc.page_content
-                                    st.text(
-                                        preview[:300] + "..."
-                                        if len(preview) > 300 else preview
-                                    )
-                    else:
-                        st.write(message["content"])
-            pass
+        # ── Chat container (compact) — show only after first interaction ──
+        if st.session_state.messages:
+            chat_container = st.container(height=300)
+            with chat_container:
+                for message in st.session_state.messages:
+                    with st.chat_message(message["role"]):
+                        if message["role"] == "assistant":
+                            if message.get("action") == "research":
+                                st.caption("🔬 Research — ผลลัพธ์อยู่ใน Research Workbench")
+                            elif message.get("action") == "edit":
+                                st.caption("✏️ แก้ไขเอกสารแล้ว")
+                            display_assistant_message(message["content"])
+                            if "tokens" in message:
+                                st.caption(
+                                    f"⏱️ {message['tokens']} tokens "
+                                    f"| ฿{message['cost_thb']:.4f}"
+                                )
+                            if "sources" in message:
+                                with st.expander("📚 แหล่งข้อมูล"):
+                                    for i, doc in enumerate(message["sources"], 1):
+                                        src_type = doc.metadata.get("source", "doc")
+                                        label = (
+                                            "📝 Note" if src_type == "research_note"
+                                            else f"📄 Doc {i}"
+                                        )
+                                        st.markdown(f"**{label}:**")
+                                        preview = doc.page_content
+                                        st.text(
+                                            preview[:300] + "..."
+                                            if len(preview) > 300 else preview
+                                        )
+                        else:
+                            st.write(message["content"])
 
         # Placeholder for spinner — sits right below chat container, above chat input
         _chat_spinner_area = st.empty()
@@ -1286,7 +1269,14 @@ def main():
         </script>
         """, height=0)
 
-        # ── Toggle: deep/short (row 1) ───────────────────────────────────
+        _input_placeholder = (
+            "📖 ถามคำถาม — AI จะตอบเชิงลึก..."
+            if st.session_state._research_mode
+            else "ถามคำถาม..."
+        )
+        prompt = st.chat_input(_input_placeholder, key="chat_input_main")
+
+        # ── Toggle: deep/short ────────────────────────────────────────────
         _deep_mode = st.toggle(
             "📖 ตอบเชิงลึก",
             value=st.session_state._research_mode,
@@ -1295,24 +1285,16 @@ def main():
         )
         st.session_state._research_mode = _deep_mode
 
-        # ── Clear button (row 2) ─────────────────────────────────────────
-        st.markdown("<div style='font-size:0.82rem;color:#6b7280;margin-bottom:2px;'>ล้างประวัติการ chat</div>", unsafe_allow_html=True)
-        if st.button("🗑️ ล้างแชท", key="clear_chat_btn", type="secondary",
+        # ── Clear chat button ─────────────────────────────────────────────
+        if st.button("🗑️ ล้างประวัติการสนทนา", key="clear_chat_btn", type="secondary",
                      use_container_width=True):
             st.session_state.messages = []
             st.session_state.total_tokens = 0
             st.session_state.total_cost_thb = 0.0
             st.rerun()
 
-        _input_placeholder = (
-            "📖 ถามคำถาม — AI จะตอบเชิงลึก..."
-            if st.session_state._research_mode
-            else "ถามคำถาม หรือ สั่งแก้ไขเอกสาร..."
-        )
-        prompt = st.chat_input(_input_placeholder, key="chat_input_main")
-
         # ── Section-by-Section: สร้างเนื้อหาวิจัย ────────────────────────
-        with st.expander("📝 สร้างเนื้อหาวิจัย (ทีละส่วน)", expanded=False):
+        with st.expander("📝 สร้างเนื้อหาวิจัย", expanded=False):
             sec_topic = st.text_input(
                 "หัวข้อเอกสาร",
                 value=work_title if work_title.strip() else "",
@@ -1321,7 +1303,7 @@ def main():
             )
             _input_mode = st.radio(
                 "วิธีระบุส่วนที่ต้องการเขียน",
-                ["เลือกจาก preset", "พิมพ์เอง"],
+                ["เลือกจาก preset", "กำหนดเอง"],
                 horizontal=True,
                 key="sec_input_mode",
                 label_visibility="collapsed",
@@ -1421,14 +1403,14 @@ def main():
         <div style="
             margin-top: 16px;
             padding: 14px 16px 10px 16px;
-            background: linear-gradient(135deg, #fef9ef 0%, #fdf2f8 100%);
-            border: 1.5px solid #f59e0b;
+            background: #e0f0ff;
+            border: 1.5px solid #001f5b;
             border-radius: 12px;
         ">
-            <div style="font-size: 1.05rem; font-weight: 700; color: #92400e; margin-bottom: 6px;">
+            <div style="font-size: 1.05rem; font-weight: 700; color: #001f5b; margin-bottom: 6px;">
                 🎓 Advisor — ตรวจงานวิจัย
             </div>
-            <div style="font-size: 0.8rem; color: #78716c; margin-bottom: 4px;">
+            <div style="font-size: 0.8rem; color: #334155; margin-bottom: 4px;">
                 อาจารย์ที่ปรึกษา AI จะ review งานใน Research Workbench
             </div>
         </div>
@@ -1448,6 +1430,18 @@ def main():
 
         st.markdown('<div style="margin-top:6px;"></div>', unsafe_allow_html=True)
 
+        st.markdown("""
+        <style>
+        .st-key-advisor_review_btn button {
+            background-color: #001f5b !important;
+            color: white !important;
+            border: none !important;
+        }
+        .st-key-advisor_review_btn button:hover {
+            background-color: #002d7a !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
         if st.button("🎓 ส่งให้อาจารย์ตรวจ", type="primary",
                      key="advisor_review_btn", use_container_width=True):
             # Read from the actual widget value (work_content from col_center),

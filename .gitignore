@@ -13,6 +13,13 @@ ENV/
 .venv/
 .virtualenv/
 
+#user saved files
+/user_data/*
+!/user_data/.gitkeep
+
+#prompts
+/md
+
 # Local vector database (ChromaDB)
 Database/
 

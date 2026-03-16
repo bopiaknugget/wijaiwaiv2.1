@@ -211,7 +211,7 @@ wijaiwaiv2.1/
 | Embeddings (HuggingFace local) | Free |
 | ChromaDB (local) | Free |
 | SQLite (local) | Free |
-| OpenThaiGPT API | Per-token ($0.4/1M tokens, displayed in THB at 1 USD = 35 THB) |
+| OpenThaiGPT API | Free (ไม่มีค่าใช้จ่าย) |
 
 ## License
 
