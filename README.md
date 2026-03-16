@@ -1,27 +1,30 @@
-# 🔬 Research Workbench — AI-Powered RAG with Research Editor
+# Research Workbench — AI-Powered RAG with Research Editor
 
 ระบบค้นคว้าวิจัยอัจฉริยะที่รวม RAG (Retrieval-Augmented Generation) เข้ากับ editor สำหรับเขียนงานวิจัย รองรับภาษาไทยและอังกฤษ ใช้ OpenThaiGPT เป็น LLM หลัก
 
-## 🎯 Architecture Overview
+An intelligent research platform combining RAG with a specialized text editor for academic research. Supports bilingual Thai/English content using OpenThaiGPT as the primary LLM.
+
+## Architecture Overview
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │                        app.py (Streamlit UI)                         │
 │                                                                      │
 │  ┌─────────────┐  ┌───────────────────────┐  ┌───────────────────┐  │
-│  │   Sidebar    │  │  🔬 Research Workbench │  │  🤖 Assistant     │  │
-│  │  📄 Documents│  │   Title + Editor      │  │   Chat + RAG Q&A │  │
-│  │  📝 Notes    │  │   Save / Load / Export│  │   Research Mode  │  │
+│  │   Sidebar    │  │  Research Workbench    │  │  Assistant        │  │
+│  │  Documents   │  │   Title + Editor      │  │   Chat + RAG Q&A │  │
+│  │  Notes       │  │   Save / Load / Export│  │   Research Mode  │  │
+│  │  Web Pages   │  │                       │  │   Advisor Review │  │
 │  └──────┬───────┘  └───────────┬───────────┘  └────────┬──────────┘  │
 │         │                      │                       │              │
 └─────────┼──────────────────────┼───────────────────────┼──────────────┘
           │                      │                       │
   ┌───────▼──────────┐   ┌──────▼───────┐   ┌──────────▼──────────┐
-  │ document_loader  │   │  your_work/  │   │    generator.py     │
+  │ document_loader  │   │  user_data/  │   │    generator.py     │
   │ PDF/TXT/DOCX     │   │  (local fs)  │   │  OpenThaiGPT API    │
   │ Parent-Child     │   └──────────────┘   │  Query re-phrasing  │
-  │ Chunking         │                      └──────────┬──────────┘
-  └───────┬──────────┘                                 │
+  │ Chunking         │                      │  Intent classifier  │
+  └───────┬──────────┘                      └──────────┬──────────┘
           │                                            │
   ┌───────▼──────────────────────────────────┐         │
   │           vector_store.py                │         │
@@ -30,42 +33,71 @@
   │  MMR + Parent-Child Retrieval            │
   └───────┬──────────────────────────────────┘
           │
-  ┌───────▼──────────┐    ┌──────────────────┐
-  │  ChromaDB        │    │  database.py     │
-  │  (unified_       │    │  SQLite          │
-  │   chroma_db/)    │    │  Notes + Parents │
-  └──────────────────┘    └──────────────────┘
+  ┌───────▼──────────┐    ┌──────────────────┐    ┌──────────────────┐
+  │  ChromaDB        │    │  database.py     │    │  reviewer.py     │
+  │  (Database/      │    │  SQLite          │    │  Thesis Advisor  │
+  │   unified_       │    │  Notes + Parents │    │  Review System   │
+  │   chroma_db/)    │    │  + Web Pages     │    │                  │
+  └──────────────────┘    └──────────────────┘    └──────────────────┘
 ```
 
-## 📋 Tech Stack
+## Tech Stack
 
 | Component | Technology |
 |-----------|-----------|
-| **Web UI** | Streamlit |
-| **LLM** | OpenThaiGPT API (รองรับภาษาไทย) |
-| **Embeddings** | HuggingFace `paraphrase-multilingual-MiniLM-L12-v2` (local, no API key) |
-| **Vector DB** | ChromaDB (local, unified collection) |
-| **Relational DB** | SQLite (`research_notes.db`) |
+| **Web UI** | Streamlit (3-panel layout) |
+| **LLM** | OpenThaiGPT API (supports Thai natively) |
+| **Embeddings** | HuggingFace `paraphrase-multilingual-MiniLM-L12-v2` (local, no API key, ~400MB) |
+| **Vector DB** | ChromaDB (local, single unified collection) |
+| **Relational DB** | SQLite (`Database/research_notes.db`) |
 | **Document Parsing** | PyPDF, docx2txt |
+| **Web Scraping** | Trafilatura + BeautifulSoup4 (fallback) |
 | **Framework** | LangChain Core + Community |
 
-## 📦 Installation
+## Installation
+
+### Prerequisites
+
+- Python 3.8+
+- Virtual environment (recommended)
+
+### Setup
 
 ```bash
-# 1. Install dependencies
+# 1. Create virtual environment (recommended)
+python -m venv venv
+
+# Windows
+venv\Scripts\activate
+# macOS/Linux
+source venv/bin/activate
+
+# 2. Install dependencies
 pip install -r requirements.txt
 
-# 2. Create .env file with your OpenThaiGPT API key
+# 3. Create .env file with your OpenThaiGPT API key
 echo "OPENTHAI_API_KEY=your_key_here" > .env
 ```
 
-## 🚀 Quick Start
+> **Note**: The `.env` file must contain just `OPENTHAI_API_KEY=your_key_here` — no quotes, no spaces around the `=`.
+
+> **Note**: First run will download the embedding model (~400MB). Subsequent runs use the cached version.
+
+## Quick Start
 
 ### Web UI (Primary)
 
 ```bash
 streamlit run app.py
 ```
+
+Opens at `http://localhost:8501` with three panels:
+
+| Panel | Features |
+|-------|----------|
+| **Sidebar** (left) | Upload documents (PDF/TXT/DOCX/DOC), manage research notes, manage web pages |
+| **Research Workbench** (center) | Text editor with title, Save/Load/Export/Import, Undo/Redo |
+| **Assistant** (right) | Chat Q&A with RAG, Research Mode, Advisor Review |
 
 ### CLI
 
@@ -81,54 +113,77 @@ python main.py --ingest doc.pdf --db ./my_db
 python main.py --query "question" --db ./my_db --k 5
 ```
 
-## 🏗️ Module Breakdown
+## Features
 
-### `app.py` — Streamlit UI
-3-panel layout:
-- **Sidebar** — Document upload (PDF/TXT/DOCX/DOC) + Research Notes (SQLite-backed)
-- **Research Workbench** (center) — Title + text editor with Save/Load/Export/Import, Undo/Redo
-- **Assistant** (right) — Chat Q&A with RAG retrieval, Research Mode for detailed answers
+### RAG-Powered Q&A
+Ask questions about your uploaded documents. The system retrieves relevant context using MMR (Maximal Marginal Relevance) search and generates answers with OpenThaiGPT. Supports follow-up questions with automatic query re-phrasing based on chat history.
 
-### `generator.py` — LLM Integration
-- OpenThaiGPT API calls (`POST http://thaillm.or.th/api/openthaigpt/v1/chat/completions`)
-- Chat-history-based query re-phrasing
-- Agentic editor manipulation (selection edit)
-- `<think>` tag stripping from chat history context
+### Research Mode
+Toggle Research Mode for comprehensive, structured answers. The AI writes detailed research output (introduction, analysis, findings, summary, references) directly into the editor with a higher token budget (12,000 tokens).
 
-### `vector_store.py` — Embeddings & Retrieval
-- Local HuggingFace embeddings (~400MB, supports Thai, no API key required)
-- Single unified ChromaDB collection separated by `source_type` metadata
-- MMR-based retrieval with parent-child expansion
-- `@st.cache_resource` on embeddings to avoid repeated model loads
+### Agentic Editor
+The assistant classifies user intent as:
+- **Chat** — answers in the chat panel
+- **Edit** — writes or modifies content in the editor
+- **Research** — deep research with structured output to editor
 
-### `document_loader.py` — Document Processing
-- PDF, TXT, DOCX, DOC loading with rich metadata extraction
-- Parent-Child Chunking: small children for precise search, large parents for context
-- Summary embedding for broad semantic matching
-- Adaptive chunk sizing based on content length (<2k→300, 2k-10k→800, >10k→1200 chars)
+Selection-based editing: highlight text in the editor and ask the AI to modify just that selection.
 
-### `database.py` — SQLite Storage
-- CRUD for research notes
-- Document metadata storage
-- Parent chunk storage for parent-child retrieval
-- Database: `research_notes.db`
+### Research Notes
+Create and manage notes that are embedded into the same vector store as documents. Notes become searchable alongside uploaded PDFs — great for annotations, summaries, and cross-referencing.
 
-### `main.py` — CLI Entry Point
-- `--ingest` mode: Load document → Chunk → Embed → Store
-- `--query` mode: Load store → MMR search → Retrieve
+### Web Content Integration
+Paste a URL to scrape and integrate web content:
+- Automatic content extraction (trafilatura with BeautifulSoup fallback)
+- AI-generated summaries and titles
+- Content is chunked and embedded into the unified vector store
+- Metadata stored in SQLite for management
 
-### `rag_pipeline.py`
-**Legacy Phase 1 reference only — do not use or extend.**
+### Advisor Review
+Click the advisor button to get your research reviewed by a strict thesis advisor persona (simulating 20+ years of expertise). Reviews cover the standard 5-chapter thesis structure:
+- Chapter 1: Introduction, objectives, hypotheses, scope
+- Chapter 2: Literature review, theoretical framework
+- Chapter 3: Research methodology
+- Chapter 4: Results presentation
+- Chapter 5: Summary, discussion, recommendations
 
-## 📁 Project Structure
+Feedback is color-coded:
+- **Red** [ต้องแก้ไข] — Must fix
+- **Green** [ดีแล้ว] — Well done
+- **Yellow** [คำแนะนำ] — Recommendations
+
+### Advanced RAG Pipeline
+- **Rich Metadata** — Each chunk carries `paper_title`, `authors`, `year`, `section`, `source_type`, `created_at`
+- **Parent-Child Chunking** — Small child chunks in ChromaDB for precise vector search; parent content (full pages) in SQLite for richer LLM context
+- **Summary Embedding** — Extractive summaries embedded alongside chunks for broad semantic matching
+- **Adaptive Chunk Sizing** — Auto-adjusts based on content length (<2k→300, 2k-10k→800, >10k→1200 chars)
+- **MMR Retrieval** — Maximal Marginal Relevance (lambda=0.6) for diverse, high-quality results
+
+## Module Breakdown
+
+| File | Responsibility |
+|---|---|
+| `app.py` | Streamlit UI, session state, `<think>` tag parsing, Research Workbench editor, 3-panel layout |
+| `generator.py` | OpenThaiGPT API calls, query re-phrasing, intent classification (chat/edit/research), editor manipulation |
+| `vector_store.py` | HuggingFace embeddings (local), unified ChromaDB collection, parent-child retrieval, MMR search |
+| `document_loader.py` | PDF/TXT/DOCX loading, metadata extraction, parent-child chunking, adaptive chunk sizing, summary embedding |
+| `database.py` | SQLite CRUD for notes, documents, parent chunks, and web pages |
+| `reviewer.py` | Research advisor review system with color-coded thesis feedback |
+| `web_scraper.py` | Web content extraction, AI summarization, content chunking into ChromaDB |
+| `main.py` | CLI entry point (`--ingest` / `--query` modes) |
+| `rag_pipeline.py` | Legacy Phase 1 (unused — do not modify) |
+
+## Project Structure
 
 ```
 wijaiwaiv2.1/
 ├── app.py                  # Streamlit Web UI (3-panel layout)
-├── generator.py            # OpenThaiGPT API integration
+├── generator.py            # OpenThaiGPT API integration + intent classifier
 ├── vector_store.py         # HuggingFace embeddings + ChromaDB
 ├── document_loader.py      # PDF/TXT/DOCX loading & chunking
-├── database.py             # SQLite CRUD (notes, parents, metadata)
+├── database.py             # SQLite CRUD (notes, parents, documents, web pages)
+├── reviewer.py             # Thesis advisor review system
+├── web_scraper.py          # Web content scraping & summarization
 ├── main.py                 # CLI entry point
 ├── rag_pipeline.py         # Legacy Phase 1 (unused)
 ├── requirements.txt        # Python dependencies
@@ -136,58 +191,28 @@ wijaiwaiv2.1/
 ├── .gitignore
 ├── CLAUDE.md               # Claude Code guidance
 ├── README.md               # This file
-├── research_notes.db       # SQLite database (auto-created)
-├── unified_chroma_db/      # ChromaDB vector store (auto-created)
-├── your_work/              # Saved research files from editor
-├── data/                   # Sample/test data
-└── md/                     # Design documents
+├── Database/               # Auto-created on first run
+│   ├── research_notes.db   # SQLite database
+│   └── unified_chroma_db/  # ChromaDB vector store
+├── user_data/              # Saved research files from editor
+└── md/                     # Design documents & task notes
 ```
 
-## 🔬 Key Features
+## Environment Variables
 
-### Advanced RAG Pipeline
-- **Rich Metadata** — Each chunk carries `paper_title`, `authors`, `year`, `section`, `source_type`, `created_at`
-- **Parent-Child Chunking** — Small child chunks in ChromaDB for precise vector search; parent content (full pages) in SQLite for richer LLM context
-- **Summary Embedding** — Extractive summaries embedded alongside chunks for broad semantic matching
-- **MMR Retrieval** — Maximal Marginal Relevance for diverse, high-quality results
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `OPENTHAI_API_KEY` | Yes | OpenThaiGPT API key for LLM calls |
 
-### Research Workbench Editor
-- Title + content text editor with auto-save
-- File operations: Save, Save As, Load, Export, Import
-- Edit operations: Undo, Redo, Clear
-- Research Mode: AI writes detailed answers directly into the editor
-
-### Assistant Chat
-- RAG-powered Q&A with context from uploaded documents and notes
-- `<think>` tag parsing — reasoning shown in collapsible expander
-- Research Mode toggle for comprehensive answers
-- Token usage tracking with cost estimation (THB)
-
-### Research Notes
-- SQLite-backed notes with full CRUD
-- Notes are embedded into the unified vector store (`source_type='note'`)
-- Searchable alongside uploaded documents
-
-## ⚙️ Environment Setup
-
-Create `.env` in the project root:
-```
-OPENTHAI_API_KEY=your_key_here
-```
-
-The API key is loaded by `generator.py` using `python-dotenv`. No quotes or spaces around the value.
-
-## 📊 Cost
+## Cost
 
 | Component | Cost |
 |-----------|------|
 | Embeddings (HuggingFace local) | Free |
 | ChromaDB (local) | Free |
 | SQLite (local) | Free |
-| OpenThaiGPT API | Per-token usage |
+| OpenThaiGPT API | Per-token ($0.4/1M tokens, displayed in THB at 1 USD = 35 THB) |
 
-Token cost is displayed in the UI in THB ($0.4/1M tokens, 1 USD = 35 THB).
-
-## 📄 License
+## License
 
 Provided as-is for educational and research purposes.
