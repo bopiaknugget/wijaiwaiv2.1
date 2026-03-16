@@ -153,63 +153,66 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
     has_context = bool(retrieved_docs)
     context_text = "\n\n".join(doc.page_content for doc in retrieved_docs) if retrieved_docs else ""
 
-    if has_context:
-        knowledge_instruction = (
-            "ใช้บริบทจากเอกสารเป็นหลักในการตอบหรือแก้ไข "
-            "หากบริบทไม่เพียงพอและจำเป็นต้องใช้ความรู้ทั่วไปของ AI "
-            "ให้ขึ้นต้น response ด้วย: "
-            "\"⚠️ หมายเหตุ: ข้อมูลนี้มาจากฐานความรู้ทั่วไปของ AI "
-            "เนื่องจากไม่พบข้อมูลในเอกสารหรือโน้ตของคุณ\""
-        )
-    else:
-        knowledge_instruction = (
-            "ไม่มีเอกสารหรือโน้ตถูกโหลดไว้ "
-            "ให้ใช้ความรู้ทั่วไปของ AI ในการตอบและแก้ไขเอกสารได้เลย"
-        )
+    # ── Language instruction ───────────────────────────────────────────────────
+    language_instruction = (
+        "ภาษา: ตอบเป็นภาษาเดียวกับที่ผู้ใช้ถาม "
+        "หากไม่แน่ใจให้ตอบเป็นภาษาไทย "
+        "ศัพท์เฉพาะทาง (technical terms) ใช้ภาษาอังกฤษได้"
+    )
 
     if research_mode:
+        # ── Research mode: deep analysis → JSON with editor_content ──────────
+        if has_context:
+            knowledge_instruction = "ใช้บริบทจากเอกสารเป็นหลักในการวิเคราะห์และสังเคราะห์"
+        else:
+            knowledge_instruction = "ไม่มีเอกสารถูกโหลดไว้ — ใช้ความรู้ทั่วไปของ AI"
+
         system_prompt = (
-            "คุณเป็นนักวิจัยผู้เชี่ยวชาญ (Deep Research Agent) "
-            "ทำหน้าที่ค้นคว้า วิเคราะห์ และสังเคราะห์ข้อมูลอย่างละเอียดถี่ถ้วน\n\n"
-            f"{knowledge_instruction}\n\n"
-            "แนวทางการทำงาน:\n"
-            "1. วิเคราะห์คำถามหรือหัวข้อวิจัยอย่างรอบด้าน พิจารณาทุกมุมมอง\n"
-            "2. ใช้บริบทจากเอกสารที่ให้มาอย่างเต็มที่ อ้างอิงข้อมูลที่เกี่ยวข้อง\n"
-            "3. เขียนผลการวิจัยอย่างละเอียด ครอบคลุม เจาะลึก\n"
-            "4. จัดโครงสร้างเนื้อหาให้ชัดเจน ประกอบด้วย:\n"
-            "   - บทนำ / ที่มาและความสำคัญ\n"
-            "   - เนื้อหาหลัก / การวิเคราะห์\n"
-            "   - ผลการศึกษา / ข้อค้นพบ\n"
-            "   - สรุปและข้อเสนอแนะ\n"
-            "   - แหล่งอ้างอิง (ถ้ามี)\n"
-            "5. ใช้ภาษาทางวิชาการที่เข้าใจง่าย เหมาะสำหรับงานวิจัย\n"
-            "6. เขียนเนื้อหาให้ยาวและละเอียดที่สุดเท่าที่จะทำได้\n\n"
-            "ตอบในรูปแบบ JSON เท่านั้น ห้ามมีข้อความอื่นนอก JSON:\n"
+            "คุณเป็นนักวิจัยผู้เชี่ยวชาญ ทำหน้าที่ค้นคว้า วิเคราะห์ และสังเคราะห์ข้อมูลเชิงลึก\n"
+            f"{knowledge_instruction}\n"
+            f"{language_instruction}\n\n"
+            "กฎการเขียน:\n"
+            "- ขยายความทุกประเด็นอย่างละเอียด ห้ามสรุปสั้นหรือตัดทอน\n"
+            "- เนื้อหาต้องมีอย่างน้อย 1,000 คำ และ 10 ย่อหน้าขึ้นไป\n"
+            "- แต่ละย่อหน้ายาวไม่น้อยกว่า 80 คำ พร้อมตัวอย่างและการวิเคราะห์\n"
+            "- ครอบคลุม: บทนำ → ทบทวนวรรณกรรม → วิเคราะห์เชิงลึก → ผลการศึกษา → สรุป/ข้อเสนอแนะ\n\n"
+            "ตอบในรูปแบบ JSON เท่านั้น:\n"
             "{\n"
             "  \"action\": \"research\",\n"
-            "  \"response\": \"สรุปสั้นๆ สิ่งที่ค้นคว้า (1-2 ประโยค สำหรับแสดงใน chat)\",\n"
-            "  \"editor_content\": \"เนื้อหาวิจัยฉบับเต็ม — เขียนอย่างละเอียด มีโครงสร้างครบถ้วน\"\n"
+            "  \"response\": \"สรุปสั้นๆ 1-2 ประโยค สำหรับแสดงใน chat\",\n"
+            "  \"editor_content\": \"เนื้อหาวิจัยฉบับเต็ม ละเอียด ครบถ้วน ≥1,000 คำ\"\n"
             "}"
         )
     else:
+        # ── Answer mode: pure Q&A — plain text, no edit action ───────────────
+        if has_context:
+            knowledge_instruction = (
+                "ใช้บริบทจากเอกสารด้านล่างเป็นหลักในการตอบ "
+                "หากบริบทไม่เพียงพอ ให้ขึ้นต้นคำตอบด้วย "
+                "\"⚠️ หมายเหตุ: ข้อมูลนี้มาจากความรู้ทั่วไปของ AI "
+                "เนื่องจากไม่พบข้อมูลในเอกสารหรือโน้ตของคุณ\""
+            )
+        else:
+            knowledge_instruction = (
+                "ไม่มีเอกสารถูกโหลดไว้ — ตอบจากความรู้ทั่วไปของ AI ได้เลย"
+            )
+
         system_prompt = (
-            "คุณเป็น Agentic Research Editor ที่ช่วยนักวิจัยทั้งในการตอบคำถามและแก้ไขเอกสาร\n\n"
-            f"{knowledge_instruction}\n\n"
-            "จำแนกคำสั่งของผู้ใช้เป็น:\n"
-            "- \"chat\" = ถามคำถาม ขอข้อมูล ขอคำอธิบาย สรุปเนื้อหา\n"
-            "- \"edit\" = สั่งให้แก้ไข เขียนใหม่ สร้าง ปรับปรุง จัดรูปแบบ หรือ generate เนื้อหาในตัวแก้ไข\n\n"
-            "ตอบในรูปแบบ JSON เท่านั้น ห้ามมีข้อความอื่นนอก JSON:\n"
-            "{\n"
-            "  \"action\": \"chat\" หรือ \"edit\",\n"
-            "  \"response\": \"ข้อความที่จะแสดงในช่องสนทนา (สำหรับ edit ให้อธิบายสั้นๆ ว่าทำอะไรไป)\",\n"
-            "  \"editor_content\": \"เนื้อหาใหม่สำหรับตัวแก้ไข (ใส่เมื่อ action=edit เท่านั้น มิฉะนั้นใส่ null)\"\n"
-            "}"
+            "คุณเป็นผู้ช่วยวิจัย ทำหน้าที่ตอบคำถามอย่างตรงประเด็นและถูกต้อง\n"
+            f"{knowledge_instruction}\n"
+            f"{language_instruction}\n\n"
+            "แนวทางการตอบ:\n"
+            "- ตอบตรงคำถาม ชัดเจน ครบถ้วน\n"
+            "- อ้างอิงเนื้อหาจากเอกสารเมื่อเกี่ยวข้อง\n"
+            "- ตอบเป็น plain text ธรรมดา ไม่ต้องมี JSON\n"
+            "- ห้ามสร้างหรือแก้ไขเอกสาร — ตอบคำถามเพียงอย่างเดียว"
         )
 
-    user_parts = [f"คำสั่ง/คำถาม: {contextual_query}"]
+    user_parts = [f"คำถาม: {contextual_query}"]
     if context_text:
         user_parts.append(f"=== บริบทจากเอกสาร ===\n{context_text}")
-    if editor_content and editor_content.strip():
+    # ส่ง editor_content เฉพาะ research mode เพื่อให้ AI รู้เนื้อหาปัจจุบัน
+    if research_mode and editor_content and editor_content.strip():
         user_parts.append(f"=== เนื้อหาในตัวแก้ไขปัจจุบัน ===\n{editor_content.strip()}")
 
     messages = [
@@ -218,9 +221,12 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
     ]
 
     # ── Step 3: Call API ───────────────────────────────────────────────────────
-    api_max_tokens = 12000 if research_mode else 3000
+    # OpenThaiGPT context window = 16,384 tokens (input + output).
+    # Reserve headroom for input tokens to avoid 400 errors.
+    api_max_tokens = 8192 if research_mode else 2048
+    api_temperature = 0.65 if research_mode else 0.3
     try:
-        raw, ri, ro = _call_api(messages, api_key, max_tokens=api_max_tokens, temperature=0.3)
+        raw, ri, ro = _call_api(messages, api_key, max_tokens=api_max_tokens, temperature=api_temperature)
         total_input += ri
         total_output += ro
     except requests.HTTPError as e:
@@ -234,63 +240,119 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
     except requests.RequestException as e:
         raise ValueError(f"❌ Request failed: {e}")
 
-    # ── Step 4: Parse structured response ─────────────────────────────────────
-    # Extract <think> blocks from raw response before JSON parsing
+    # ── Step 4: Parse response ─────────────────────────────────────────────────
     think_matches = re.findall(r'<think>.*?</think>', raw, re.DOTALL)
     think_prefix = '\n'.join(think_matches).strip()
-
-    # Strip <think> tags BEFORE attempting JSON parse so they don't interfere
     raw_clean = _THINK_RE.sub('', raw).strip()
 
-    parsed = _extract_json(raw_clean)
-    if parsed is None:
-        answer_text = raw_clean
-        if not has_context and not answer_text.startswith("⚠️"):
-            answer_text = _PARAMETRIC_WARNING + "\n\n" + answer_text
-
-        # Research mode fallback: even if JSON fails, push content to editor
-        if research_mode and answer_text:
-            response_text = "🔬 ผลการค้นคว้าถูกส่งไปยัง Research Workbench แล้ว"
-            if think_prefix:
-                response_text = (think_prefix + "\n\n" + response_text).strip()
-            return "research", response_text, answer_text, total_input, total_output
-
-        # Re-attach think blocks so app.py can display them
-        response_text = (think_prefix + "\n\n" + answer_text).strip() if think_prefix else answer_text
+    # ── Answer mode: plain text — no JSON parsing needed ─────────────────────
+    if not research_mode:
+        response_text = raw_clean
+        if not has_context and not response_text.startswith("⚠️"):
+            response_text = _PARAMETRIC_WARNING + "\n\n" + response_text
+        if think_prefix:
+            response_text = (think_prefix + "\n\n" + response_text).strip()
         return "chat", response_text, None, total_input, total_output
 
-    action = str(parsed.get("action", "chat")).lower()
-    if action not in ("chat", "edit", "research"):
-        action = "research" if research_mode else "chat"
+    # ── Research mode: parse JSON → push editor_content to editor ────────────
+    parsed = _extract_json(raw_clean)
+    if parsed is None:
+        # JSON parse failed — try regex extraction of editor_content
+        editor_match = re.search(
+            r'"editor_content"\s*:\s*"((?:[^"\\]|\\.)*)"',
+            raw_clean, re.DOTALL
+        )
+        if editor_match:
+            editor_text = editor_match.group(1)
+            try:
+                editor_text = json.loads(f'"{editor_text}"')
+            except (json.JSONDecodeError, ValueError):
+                pass
+        else:
+            editor_text = raw_clean  # fallback: full text to editor
+
+        response_text = "🔬 ผลการค้นคว้าถูกส่งไปยัง Research Workbench แล้ว"
+        if think_prefix:
+            response_text = (think_prefix + "\n\n" + response_text).strip()
+        return "research", response_text, editor_text, total_input, total_output
 
     response_text = str(parsed.get("response", "")).strip()
-    # Re-attach think blocks so app.py can display them
     if think_prefix:
         response_text = (think_prefix + "\n\n" + response_text).strip()
 
     new_editor = parsed.get("editor_content")
     if isinstance(new_editor, str):
         new_editor = new_editor.strip() or None
-    elif new_editor is not None:
-        new_editor = None  # discard non-string values (e.g. null/None already fine)
+    else:
+        new_editor = None
 
-    # Research mode safety net: if LLM didn't provide editor_content,
-    # use response text as editor content so it doesn't get lost in chat
-    if research_mode and not new_editor and response_text:
-        clean_response = _THINK_RE.sub('', response_text).strip()
-        if clean_response:
-            new_editor = clean_response
-            action = "research"
+    # Safety net: LLM forgot editor_content → use response text
+    if not new_editor and response_text:
+        new_editor = _THINK_RE.sub('', response_text).strip() or None
 
-    # Python-level safety net: always prepend warning when no RAG context was available
-    if not has_context and response_text and not response_text.startswith("⚠️"):
-        response_text = _PARAMETRIC_WARNING + "\n\n" + response_text
+    # Must have content to be a research action
+    if not new_editor:
+        return "chat", response_text, None, total_input, total_output
 
-    # edit/research action must deliver content; demote to chat otherwise
-    if action in ("edit", "research") and not new_editor:
-        action = "chat"
+    return "research", response_text, new_editor, total_input, total_output
 
-    return action, response_text, new_editor, total_input, total_output
+
+def generate_section(topic, section_instruction, retrieved_docs=None,
+                     existing_content=""):
+    """
+    Generate a single section of long-form content to APPEND to the editor.
+    Used by the Section-by-Section mode for building documents incrementally.
+
+    Args:
+        topic: The overall document topic
+        section_instruction: What to write in this section
+        retrieved_docs: Optional RAG context
+        existing_content: Current editor content (for continuity)
+
+    Returns:
+        tuple: (section_text, input_tokens, output_tokens)
+    """
+    env_path = Path(__file__).parent / ".env"
+    load_dotenv(dotenv_path=env_path)
+    api_key = os.getenv("OPENTHAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENTHAI_API_KEY not found")
+
+    context_text = ""
+    if retrieved_docs:
+        context_text = "\n\n".join(doc.page_content for doc in retrieved_docs)
+
+    system_prompt = (
+        "คุณเป็นนักเขียนวิชาการผู้เชี่ยวชาญ ทำหน้าที่เขียนเนื้อหาทีละส่วน (section)\n\n"
+        "กฎด้านภาษา:\n"
+        "- เขียนเป็นภาษาเดียวกับที่ผู้ใช้ใช้ในคำสั่ง หากไม่แน่ใจให้เขียนเป็นภาษาไทย\n"
+        "- สามารถใช้ศัพท์เฉพาะทาง (technical terms) เป็นภาษาอังกฤษได้\n\n"
+        "กฎการเขียน:\n"
+        "- เขียนเฉพาะส่วนที่ได้รับมอบหมายเท่านั้น ห้ามเขียนส่วนอื่น\n"
+        "- เนื้อหาแต่ละส่วนต้องมีอย่างน้อย 300 คำ และ 3 ย่อหน้าขึ้นไป\n"
+        "- ห้ามสรุปสั้น ให้ขยายความอย่างละเอียด ยกตัวอย่าง อธิบายทฤษฎี\n"
+        "- ต้องต่อเนื่องจากเนื้อหาที่มีอยู่แล้ว ห้ามเขียนซ้ำ\n"
+        "- ตอบเฉพาะเนื้อหาส่วนนั้นโดยตรง ห้ามมีคำอธิบายเพิ่มเติม\n"
+        "- ห้ามใส่ JSON wrapper ตอบเป็น plain text เท่านั้น"
+    )
+
+    user_parts = [f"หัวข้อเอกสาร: {topic}", f"ส่วนที่ต้องเขียน: {section_instruction}"]
+    if context_text:
+        user_parts.append(f"=== บริบทจากเอกสาร ===\n{context_text}")
+    if existing_content and existing_content.strip():
+        # Send only the last 1500 chars for continuity context
+        tail = existing_content.strip()[-1500:]
+        user_parts.append(f"=== เนื้อหาที่เขียนไปแล้ว (ส่วนท้าย) ===\n{tail}")
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+    content, input_tokens, output_tokens = _call_api(
+        messages, api_key, max_tokens=8192, temperature=0.65
+    )
+    content = _THINK_RE.sub('', content).strip()
+    return content, input_tokens, output_tokens
 
 
 def generate_selection_edit(selected_text, instruction):
@@ -308,7 +370,8 @@ def generate_selection_edit(selected_text, instruction):
         "คุณเป็นผู้ช่วยแก้ไขข้อความ ผู้ใช้จะส่งข้อความที่เลือกไว้ "
         "พร้อมคำสั่งว่าต้องการแก้ไขอย่างไร\n"
         "ตอบเฉพาะข้อความที่แก้ไขแล้วเท่านั้น ห้ามมีคำอธิบายหรือข้อความเพิ่มเติม "
-        "ห้ามใส่เครื่องหมายคำพูดครอบข้อความ"
+        "ห้ามใส่เครื่องหมายคำพูดครอบข้อความ\n"
+        "แก้ไขโดยรักษาภาษาเดิมของข้อความ หากคำสั่งเป็นภาษาไทยให้ตอบเป็นภาษาไทย"
     )
     user_msg = (
         f"ข้อความที่เลือก:\n\"\"\"\n{selected_text}\n\"\"\"\n\n"

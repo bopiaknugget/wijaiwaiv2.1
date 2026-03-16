@@ -14,6 +14,7 @@ import gc
 import json
 import os
 import re
+import requests
 import shutil
 import tempfile
 import uuid
@@ -26,7 +27,7 @@ from document_loader import (
     load_document, chunk_documents,
     enrich_metadata, create_parent_child_chunks, create_summary_documents,
 )
-from generator import generate_answer, generate_selection_edit
+from generator import generate_answer, generate_selection_edit, generate_section
 from reviewer import review_research
 from web_scraper import scrape_url, summarize_content, generate_title, prepare_web_chunks
 from vector_store import (
@@ -945,6 +946,8 @@ def main():
             clear_editor_clicked = st.button("🗑️ Clear",
                                              key="clear_editor_btn", use_container_width=True)
 
+        # (Long-Form Generator moved to right panel)
+
         # ── Button logic ───────────────────────────────────────────────────────
         if save_clicked:
             if not work_title.strip() or not work_content.strip():
@@ -1128,35 +1131,8 @@ def main():
         unified_store = st.session_state.unified_vector_store
         has_context = unified_store is not None
 
-        # ── Research mode indicator ───────────────────────────────────────
-        if st.session_state._research_mode:
-            st.markdown("""
-            <div style="
-                background: linear-gradient(135deg, #eff6ff 0%, #f0fdf4 100%);
-                border: 2px solid #3b82f6;
-                border-radius: 10px;
-                padding: 10px 16px;
-                margin-bottom: 8px;
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-            ">
-                <div>
-                    <span style="font-size: 1.1rem; font-weight: 700; color: #1e40af;">
-                        🔬 Research Mode
-                    </span>
-                    <span style="font-size: 0.85rem; color: #6b7280; margin-left: 8px;">
-                        คำตอบจะละเอียดขึ้นและแสดงใน Research Workbench
-                    </span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            if st.button("✕ ออกจาก Research Mode", key="exit_research_mode_btn",
-                         type="secondary", use_container_width=True):
-                st.session_state._research_mode = False
-                st.rerun()
-
-        chat_container = st.container(height=480)
+        # ── Chat container (compact) ─────────────────────────────────────
+        chat_container = st.container(height=300)
         with chat_container:
             for message in st.session_state.messages:
                 with st.chat_message(message["role"]):
@@ -1172,7 +1148,7 @@ def main():
                                 f"| ฿{message['cost_thb']:.4f}"
                             )
                         if "sources" in message:
-                            with st.expander("📚 Sources"):
+                            with st.expander("📚 แหล่งข้อมูล"):
                                 for i, doc in enumerate(message["sources"], 1):
                                     src_type = doc.metadata.get("source", "doc")
                                     label = (
@@ -1186,20 +1162,13 @@ def main():
                                         if len(preview) > 300 else preview
                                     )
                     else:
-                        # Show research badge on user message if it was a /research query
-                        if message.get("research"):
-                            st.caption("🔬 Research Mode")
                         st.write(message["content"])
-            if not st.session_state.messages and not has_context:
-                st.info(
-                    "📄 Upload documents or save a note for RAG-based answers.\n\n"
-                    "💡 พิมพ์ `/research` ก่อนคำถามเพื่อเข้าสู่โหมดค้นคว้าเชิงลึก"
-                )
+            pass
 
         # Placeholder for spinner — sits right below chat container, above chat input
         _chat_spinner_area = st.empty()
 
-        # ── Tab-autocomplete JS: /r → /research ──────────────────────────
+        # ── JS helpers: widget warnings + content edit overlay ─────────────
         import streamlit.components.v1 as components
         components.html("""
         <script>
@@ -1213,35 +1182,6 @@ def main():
             });
         };
         setInterval(_hideWidgetWarnings, 300);
-
-        // ── Autocomplete: /r + Tab → /research ──
-        const _setupAutocomplete = () => {
-            const textarea = parent.document.querySelector(
-                'textarea[data-testid="stChatInputTextArea"]'
-            );
-            if (!textarea || textarea._rcAutoComplete) return;
-            textarea._rcAutoComplete = true;
-            textarea.addEventListener('keydown', function(e) {
-                if (e.key !== 'Tab') return;
-                const val = this.value;
-                if (val.match(/^\\/r(?!esearch)/) ) {
-                    e.preventDefault();
-                    const rest = val.replace(/^\\/r\\s*/, '');
-                    const nset = Object.getOwnPropertyDescriptor(
-                        window.HTMLTextAreaElement.prototype, 'value'
-                    ).set;
-                    nset.call(this, '/research ' + rest);
-                    this.dispatchEvent(new Event('input', {bubbles: true}));
-                }
-            });
-        };
-        const _iv = setInterval(() => {
-            const ta = parent.document.querySelector(
-                'textarea[data-testid="stChatInputTextArea"]'
-            );
-            if (ta) { clearInterval(_iv); _setupAutocomplete(); }
-        }, 300);
-        setTimeout(() => clearInterval(_iv), 10000);
 
         // ── Content Edit: right-click on selected text → floating chatbox ──
         const _removeEditOverlay = () => {
@@ -1346,19 +1286,135 @@ def main():
         </script>
         """, height=0)
 
-        # Chat input
-        prompt = st.chat_input(
-            "พิมพ์ /r + Tab → /research | ถามคำถาม หรือ สั่งแก้ไขเอกสาร...",
-            key="chat_input_main",
+        # ── Toggle: deep/short (row 1) ───────────────────────────────────
+        _deep_mode = st.toggle(
+            "📖 ตอบเชิงลึก",
+            value=st.session_state._research_mode,
+            key="_deep_toggle",
+            help="เปิด: AI ตอบละเอียด วิเคราะห์เชิงลึก | ปิด: ตอบสั้นกระชับ",
         )
+        st.session_state._research_mode = _deep_mode
 
-        # ── Clear Chat button — below the chat input ───────────────────────
-        if st.button("🗑️ Clear Chat History", type="secondary",
-                     key="clear_chat_btn", use_container_width=True):
+        # ── Clear button (row 2) ─────────────────────────────────────────
+        st.markdown("<div style='font-size:0.82rem;color:#6b7280;margin-bottom:2px;'>ล้างประวัติการ chat</div>", unsafe_allow_html=True)
+        if st.button("🗑️ ล้างแชท", key="clear_chat_btn", type="secondary",
+                     use_container_width=True):
             st.session_state.messages = []
             st.session_state.total_tokens = 0
             st.session_state.total_cost_thb = 0.0
             st.rerun()
+
+        _input_placeholder = (
+            "📖 ถามคำถาม — AI จะตอบเชิงลึก..."
+            if st.session_state._research_mode
+            else "ถามคำถาม หรือ สั่งแก้ไขเอกสาร..."
+        )
+        prompt = st.chat_input(_input_placeholder, key="chat_input_main")
+
+        # ── Section-by-Section: สร้างเนื้อหาวิจัย ────────────────────────
+        with st.expander("📝 สร้างเนื้อหาวิจัย (ทีละส่วน)", expanded=False):
+            sec_topic = st.text_input(
+                "หัวข้อเอกสาร",
+                value=work_title if work_title.strip() else "",
+                placeholder="เช่น ผลกระทบของ AI ต่อการศึกษา",
+                key="sec_topic_input",
+            )
+            _input_mode = st.radio(
+                "วิธีระบุส่วนที่ต้องการเขียน",
+                ["เลือกจาก preset", "พิมพ์เอง"],
+                horizontal=True,
+                key="sec_input_mode",
+                label_visibility="collapsed",
+            )
+
+            if _input_mode == "เลือกจาก preset":
+                sec_presets = [
+                    "บทที่ 1: บทนำ — ที่มาและความสำคัญ วัตถุประสงค์ ขอบเขต",
+                    "บทที่ 2: ทบทวนวรรณกรรม — ทฤษฎีและงานวิจัยที่เกี่ยวข้อง",
+                    "บทที่ 3: วิธีดำเนินการวิจัย — ประชากร เครื่องมือ การเก็บข้อมูล",
+                    "บทที่ 4: ผลการวิจัย — นำเสนอข้อมูลและการวิเคราะห์",
+                    "บทที่ 5: สรุป อภิปราย และข้อเสนอแนะ",
+                ]
+                preset_choice = st.radio(
+                    "เลือก preset",
+                    sec_presets,
+                    key="sec_preset_select",
+                    label_visibility="collapsed",
+                )
+                sec_instruction = ""
+            else:
+                sec_instruction = st.text_area(
+                    "ส่วนที่ต้องการเขียน",
+                    placeholder=(
+                        "เช่น บทนำ — ที่มาและความสำคัญของปัญหา\n"
+                        "หรือ ทบทวนวรรณกรรม — ทฤษฎีและงานวิจัยที่เกี่ยวข้อง"
+                    ),
+                    height=80,
+                    key="sec_instruction_input",
+                )
+                preset_choice = None
+
+            sec_generate = st.button(
+                "🚀 สร้างเนื้อหา",
+                key="sec_generate_btn",
+                type="primary",
+                use_container_width=True,
+            )
+
+            if sec_generate:
+                final_instruction = preset_choice if preset_choice else sec_instruction.strip()
+
+                if not sec_topic.strip():
+                    st.warning("⚠️ กรุณาระบุหัวข้อเอกสาร")
+                elif not final_instruction:
+                    st.warning("⚠️ กรุณาระบุส่วนที่ต้องการเขียน หรือเลือกจาก preset")
+                else:
+                    _sec_store = st.session_state.unified_vector_store
+                    retrieved = []
+                    if _sec_store is not None:
+                        try:
+                            retrieved = retrieve_unified(
+                                _sec_store, f"{sec_topic} {final_instruction}", k=3
+                            )
+                        except Exception as e:
+                            st.warning(f"⚠️ ไม่สามารถดึงบริบทจากเอกสารได้: {e}")
+
+                    with st.spinner(f"✍️ กำลังเขียน: {final_instruction[:50]}..."):
+                        try:
+                            section_text, ri, ro = generate_section(
+                                topic=sec_topic.strip(),
+                                section_instruction=final_instruction,
+                                retrieved_docs=retrieved,
+                                existing_content=work_content,
+                            )
+
+                            separator = "\n\n" if work_content.strip() else ""
+                            new_content = work_content + separator + section_text
+
+                            st.session_state.ai_edit_undo_stack.append(work_content)
+                            if len(st.session_state.ai_edit_undo_stack) > 20:
+                                st.session_state.ai_edit_undo_stack.pop(0)
+                            st.session_state.ai_edit_redo_stack = []
+                            st.session_state["_pending_work_content"] = new_content
+                            st.session_state.work_content_val = new_content
+
+                            total_tokens_turn = ri + ro
+                            cost_thb = (total_tokens_turn / 1_000_000) * 0.4 * 35
+                            st.session_state.total_tokens += total_tokens_turn
+                            st.session_state.total_cost_thb += cost_thb
+
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "content": f"📝 เขียนส่วน \"{final_instruction[:60]}\" เสร็จแล้ว — ต่อท้ายใน editor",
+                                "tokens": total_tokens_turn,
+                                "cost_thb": cost_thb,
+                                "action": "edit",
+                            })
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(f"❌ API Error: {str(e)}")
+                        except Exception as e:
+                            st.error(f"❌ เกิดข้อผิดพลาดในการสร้างเนื้อหา: {str(e)}")
 
         # ── Advisor Review Section ────────────────────────────────────────
         st.markdown("""
@@ -1465,15 +1521,14 @@ def main():
                     })
                     st.rerun()
 
-            # ── Detect /research prefix ───────────────────────────────────
-            is_research = False
+            # ── Detect mode: toggle or /research prefix ────────────────────
+            is_research = st.session_state._research_mode
             actual_query = prompt
+            # /research prefix still works as override
             if re.match(r'^/research\b\s*', prompt, re.IGNORECASE):
                 is_research = True
                 actual_query = re.sub(r'^/research\s*', '', prompt, flags=re.IGNORECASE).strip()
                 st.session_state._research_mode = True
-            elif st.session_state._research_mode:
-                is_research = True
 
             # If /research was typed alone with no query, just toggle mode on
             if is_research and not actual_query:
@@ -1531,10 +1586,26 @@ def main():
                         st.session_state["_pending_work_content"] = new_editor_content
                         st.session_state.work_content_val = new_editor_content
 
+                except ValueError as e:
+                    # API errors (invalid key, quota, HTTP errors) from generator.py
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": str(e),
+                    })
+                except requests.exceptions.Timeout:
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": "❌ การเชื่อมต่อ API หมดเวลา กรุณาลองใหม่อีกครั้ง",
+                    })
+                except requests.exceptions.ConnectionError:
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": "❌ ไม่สามารถเชื่อมต่อ API ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต",
+                    })
                 except Exception as e:
                     st.session_state.messages.append({
                         "role": "assistant",
-                        "content": f"❌ Error: {str(e)}"
+                        "content": f"❌ เกิดข้อผิดพลาด: {str(e)}",
                     })
             st.rerun()
 
