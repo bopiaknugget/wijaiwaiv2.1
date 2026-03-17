@@ -1263,6 +1263,37 @@ def main():
         </script>
         """, height=0)
 
+        # ── Highlight edited text after rerun ─────────────────────────────
+        _hl = st.session_state.pop("_highlight_sel", None)
+        if _hl:
+            _hl_start, _hl_end = _hl
+            components.html(f"""
+            <script>
+            (function() {{
+                const _highlightEdited = () => {{
+                    const textareas = parent.document.querySelectorAll('textarea');
+                    for (const ta of textareas) {{
+                        if (ta.placeholder && ta.placeholder.includes('Start writing')) {{
+                            ta.focus();
+                            ta.setSelectionRange({_hl_start}, {_hl_end});
+                            // Scroll to the selection
+                            const lineHeight = parseInt(getComputedStyle(ta).lineHeight) || 20;
+                            const approxLine = ta.value.substring(0, {_hl_start}).split('\\n').length;
+                            ta.scrollTop = Math.max(0, (approxLine - 3) * lineHeight);
+                            return true;
+                        }}
+                    }}
+                    return false;
+                }};
+                // Retry a few times to handle Streamlit render timing
+                let tries = 0;
+                const iv = setInterval(() => {{
+                    if (_highlightEdited() || ++tries > 10) clearInterval(iv);
+                }}, 200);
+            }})();
+            </script>
+            """, height=0)
+
         _input_placeholder = (
             "📖 ถามคำถาม — AI จะตอบเชิงลึก..."
             if st.session_state._research_mode
@@ -1485,6 +1516,11 @@ def main():
                         st.session_state.ai_edit_redo_stack = []
                         st.session_state["_pending_work_content"] = new_content
                         st.session_state.work_content_val = new_content
+
+                        # Store position of edited text for post-rerun highlight
+                        edit_start = new_content.find(edited)
+                        if edit_start >= 0:
+                            st.session_state["_highlight_sel"] = (edit_start, edit_start + len(edited))
 
                         total_tokens_turn = ri + ro
                         cost_thb = (total_tokens_turn / 1_000_000) * 0.4 * 35
