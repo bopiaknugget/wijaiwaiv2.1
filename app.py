@@ -1242,30 +1242,24 @@ def main():
             overlay.addEventListener('click', (e) => { if (e.target === overlay) _removeEditOverlay(); });
         };
 
-        const _setupContentEdit = () => {
-            const textareas = parent.document.querySelectorAll('textarea');
-            for (const ta of textareas) {
-                if (ta.placeholder && ta.placeholder.includes('Start writing')) {
-                    if (ta._contentEditAttached) return;
-                    ta._contentEditAttached = true;
-                    ta.addEventListener('contextmenu', function(e) {
-                        const sel = this.value.substring(this.selectionStart, this.selectionEnd);
-                        if (!sel.trim()) return;
-                        e.preventDefault();
-                        _showEditOverlay(e.clientX, e.clientY, sel);
-                    });
+        // ── Event Delegation: ผูก listener เดียวที่ parent.document ──
+        // ลบ listener เก่าออกก่อน (ป้องกันทับซ้อนเมื่อ st.rerun() สร้าง iframe ใหม่)
+        if (parent.window._customContextMenuListener) {
+            parent.document.removeEventListener('contextmenu', parent.window._customContextMenuListener);
+        }
+
+        parent.window._customContextMenuListener = function(e) {
+            const ta = e.target;
+            if (ta && ta.tagName === 'TEXTAREA' && ta.placeholder && ta.placeholder.includes('Start writing')) {
+                const sel = ta.value.substring(ta.selectionStart, ta.selectionEnd);
+                if (sel.trim().length > 0) {
+                    e.preventDefault();
+                    _showEditOverlay(e.clientX, e.clientY, sel);
                 }
             }
         };
 
-        const _ceIv = setInterval(() => {
-            _setupContentEdit();
-            const found = Array.from(parent.document.querySelectorAll('textarea')).some(
-                ta => ta.placeholder && ta.placeholder.includes('Start writing') && ta._contentEditAttached
-            );
-            if (found) clearInterval(_ceIv);
-        }, 500);
-        setTimeout(() => clearInterval(_ceIv), 15000);
+        parent.document.addEventListener('contextmenu', parent.window._customContextMenuListener);
         </script>
         """, height=0)
 
