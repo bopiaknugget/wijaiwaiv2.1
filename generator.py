@@ -155,9 +155,7 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
 
     # ── Language instruction ───────────────────────────────────────────────────
     language_instruction = (
-        "ภาษา: ตอบเป็นภาษาเดียวกับที่ผู้ใช้ถาม "
-        "หากไม่แน่ใจให้ตอบเป็นภาษาไทย "
-        "ศัพท์เฉพาะทาง (technical terms) ใช้ภาษาอังกฤษได้"
+        "ภาษา: ตอบภาษาเดียวกับคำถาม (default ไทย), technical terms ใช้อังกฤษได้"
     )
 
     if research_mode:
@@ -168,20 +166,14 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
             knowledge_instruction = "ไม่มีเอกสารถูกโหลดไว้ — ใช้ความรู้ทั่วไปของ AI"
 
         system_prompt = (
-            "คุณเป็นนักวิจัยผู้เชี่ยวชาญ ทำหน้าที่ค้นคว้า วิเคราะห์ และสังเคราะห์ข้อมูลเชิงลึก\n"
+            "คุณเป็นนักวิจัยผู้เชี่ยวชาญ ค้นคว้า วิเคราะห์ และสังเคราะห์ข้อมูลเชิงลึก\n"
             f"{knowledge_instruction}\n"
             f"{language_instruction}\n\n"
             "กฎการเขียน:\n"
-            "- ขยายความทุกประเด็นอย่างละเอียด ห้ามสรุปสั้นหรือตัดทอน\n"
-            "- เนื้อหาต้องมีอย่างน้อย 1,000 คำ และ 10 ย่อหน้าขึ้นไป\n"
-            "- แต่ละย่อหน้ายาวไม่น้อยกว่า 80 คำ พร้อมตัวอย่างและการวิเคราะห์\n"
-            "- ครอบคลุม: บทนำ → ทบทวนวรรณกรรม → วิเคราะห์เชิงลึก → ผลการศึกษา → สรุป/ข้อเสนอแนะ\n\n"
-            "ตอบในรูปแบบ JSON เท่านั้น:\n"
-            "{\n"
-            "  \"action\": \"research\",\n"
-            "  \"response\": \"สรุปสั้นๆ 1-2 ประโยค สำหรับแสดงใน chat\",\n"
-            "  \"editor_content\": \"เนื้อหาวิจัยฉบับเต็ม ละเอียด ครบถ้วน ≥1,000 คำ\"\n"
-            "}"
+            "- เนื้อหา ≥1,000 คำ, ≥10 ย่อหน้า, แต่ละย่อหน้า ≥80 คำ พร้อมตัวอย่างและการวิเคราะห์\n"
+            "- โครงสร้าง: บทนำ → ทบทวนวรรณกรรม → วิเคราะห์เชิงลึก → ผลการศึกษา → สรุป/ข้อเสนอแนะ\n\n"
+            "ตอบ JSON เท่านั้น:\n"
+            "{\"action\":\"research\",\"response\":\"สรุป 1-2 ประโยค\",\"editor_content\":\"เนื้อหาฉบับเต็ม ≥1,000 คำ\"}"
         )
     else:
         # ── Answer mode: pure Q&A — plain text, no edit action ───────────────
@@ -323,17 +315,12 @@ def generate_section(topic, section_instruction, retrieved_docs=None,
         context_text = "\n\n".join(doc.page_content for doc in retrieved_docs)
 
     system_prompt = (
-        "คุณเป็นนักเขียนวิชาการผู้เชี่ยวชาญ ทำหน้าที่เขียนเนื้อหาทีละส่วน (section)\n\n"
-        "กฎด้านภาษา:\n"
-        "- เขียนเป็นภาษาเดียวกับที่ผู้ใช้ใช้ในคำสั่ง หากไม่แน่ใจให้เขียนเป็นภาษาไทย\n"
-        "- สามารถใช้ศัพท์เฉพาะทาง (technical terms) เป็นภาษาอังกฤษได้\n\n"
+        "คุณเป็นนักเขียนวิชาการผู้เชี่ยวชาญ เขียนเนื้อหาทีละ section\n"
+        "ภาษา: ตอบภาษาเดียวกับคำสั่ง (default ไทย), technical terms ใช้อังกฤษได้\n\n"
         "กฎการเขียน:\n"
-        "- เขียนเฉพาะส่วนที่ได้รับมอบหมายเท่านั้น ห้ามเขียนส่วนอื่น\n"
-        "- เนื้อหาแต่ละส่วนต้องมีอย่างน้อย 300 คำ และ 3 ย่อหน้าขึ้นไป\n"
-        "- ห้ามสรุปสั้น ให้ขยายความอย่างละเอียด ยกตัวอย่าง อธิบายทฤษฎี\n"
-        "- ต้องต่อเนื่องจากเนื้อหาที่มีอยู่แล้ว ห้ามเขียนซ้ำ\n"
-        "- ตอบเฉพาะเนื้อหาส่วนนั้นโดยตรง ห้ามมีคำอธิบายเพิ่มเติม\n"
-        "- ห้ามใส่ JSON wrapper ตอบเป็น plain text เท่านั้น"
+        "- เขียนเฉพาะส่วนที่ได้รับมอบหมาย ห้ามเขียนส่วนอื่นหรือซ้ำกับเนื้อหาเดิม\n"
+        "- ความยาวขั้นต่ำ 400 คำ, ≥4 ย่อหน้า — ขยายความละเอียด ยกตัวอย่าง อ้างทฤษฎี อธิบายกลไก\n"
+        "- ตอบเป็น plain text เท่านั้น ห้าม JSON ห้ามคำอธิบายเพิ่ม"
     )
 
     user_parts = [f"หัวข้อเอกสาร: {topic}", f"ส่วนที่ต้องเขียน: {section_instruction}"]
@@ -376,6 +363,42 @@ def generate_selection_edit(selected_text, instruction):
     user_msg = (
         f"ข้อความที่เลือก:\n\"\"\"\n{selected_text}\n\"\"\"\n\n"
         f"คำสั่งแก้ไข: {instruction}"
+    )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_msg},
+    ]
+    content, input_tokens, output_tokens = _call_api(
+        messages, api_key, max_tokens=2048, temperature=0.3
+    )
+    content = _THINK_RE.sub('', content).strip()
+    return content, input_tokens, output_tokens
+
+
+def generate_insertion(context_before, context_after, instruction):
+    """
+    Generate text to insert at a cursor position based on surrounding context.
+    Returns (inserted_text, input_tokens, output_tokens).
+    """
+    env_path = Path(__file__).parent / ".env"
+    load_dotenv(dotenv_path=env_path)
+    api_key = os.getenv("OPENTHAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENTHAI_API_KEY not found")
+
+    system_prompt = (
+        "คุณเป็นผู้ช่วยเขียนข้อความ ผู้ใช้จะระบุบริบทก่อนและหลังตำแหน่งที่ต้องการแทรก "
+        "พร้อมคำสั่งว่าต้องการแทรกข้อความอะไร\n"
+        "ตอบเฉพาะข้อความที่ต้องแทรกเท่านั้น ห้ามมีคำอธิบายหรือข้อความเพิ่มเติม "
+        "ห้ามใส่เครื่องหมายคำพูดครอบข้อความ\n"
+        "เขียนให้เข้ากับบริบทรอบข้าง รักษาภาษาเดิม หากคำสั่งเป็นภาษาไทยให้ตอบเป็นภาษาไทย"
+    )
+    before_preview = context_before[-300:] if len(context_before) > 300 else context_before
+    after_preview = context_after[:300] if len(context_after) > 300 else context_after
+    user_msg = (
+        f"บริบทก่อนตำแหน่งแทรก:\n\"\"\"\n{before_preview}\n\"\"\"\n\n"
+        f"บริบทหลังตำแหน่งแทรก:\n\"\"\"\n{after_preview}\n\"\"\"\n\n"
+        f"คำสั่ง: {instruction}"
     )
     messages = [
         {"role": "system", "content": system_prompt},

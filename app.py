@@ -27,7 +27,7 @@ from document_loader import (
     load_document, chunk_documents,
     enrich_metadata, create_parent_child_chunks, create_summary_documents,
 )
-from generator import generate_answer, generate_selection_edit, generate_section
+from generator import generate_answer, generate_selection_edit, generate_insertion, generate_section
 from reviewer import review_research
 from web_scraper import scrape_url, summarize_content, generate_title, prepare_web_chunks
 from vector_store import (
@@ -332,6 +332,7 @@ def main():
         with splash.container():
             st.markdown(f"""
             <style>
+            @import url('https://fonts.googleapis.com/css2?family=Prompt:wght@400;600;700&family=Montserrat:wght@400;600;700&display=swap');
             @keyframes fadeIn {{
                 from {{ opacity: 0; }}
                 to {{ opacity: 1; }}
@@ -344,6 +345,7 @@ def main():
                 background: #f8faff;
                 border-radius: 16px;
                 animation: fadeIn 0.8s ease-out both;
+                font-family: 'Montserrat', 'Prompt', sans-serif;
             }}
             .splash-banner {{
                 max-width: 100%;
@@ -366,6 +368,7 @@ def main():
         with loading.container():
             st.markdown(f"""
             <style>
+            @import url('https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;600&family=Montserrat:wght@400;600&display=swap');
             @keyframes pulse {{
                 0%, 100% {{ opacity: 1; }}
                 50% {{ opacity: 0.4; }}
@@ -377,11 +380,15 @@ def main():
                 justify-content: center;
                 min-height: 80vh;
                 text-align: center;
+                font-family: 'Montserrat', 'Prompt', sans-serif;
             }}
             .loading-subtitle {{
                 font-size: 1rem;
+                font-family: 'Prompt', sans-serif;
+                font-weight: 300;
                 color: #6b7280;
                 margin-bottom: 2rem;
+                letter-spacing: 0.03em;
             }}
             </style>
             <div class="loading-screen">
@@ -437,6 +444,141 @@ def main():
     # ── Styles ────────────────────────────────────────────────────────────────
     st.markdown("""
     <style>
+    /* ══════════════════════════════════════════════════════════════════
+       GOOGLE FONTS IMPORTS
+       Prompt  — Thai UI font
+       Montserrat — English / Latin font
+       Sarabun — editor & text inputs
+    ══════════════════════════════════════════════════════════════════ */
+    @import url('https://fonts.googleapis.com/css2?family=Prompt:ital,wght@0,300;0,400;0,500;0,600;0,700&family=Montserrat:ital,wght@0,400;0,500;0,600;0,700&family=Sarabun:ital,wght@0,300;0,400;0,500;0,600&display=swap');
+
+    /* ── Base: Montserrat (Latin) + Prompt (Thai) ────────────────────
+       IMPORTANT: do NOT set on html/body — that cascades !important
+       into Streamlit's Material Symbols icon spans and breaks them.
+       Target only known text-bearing elements instead.
+    ─────────────────────────────────────────────────────────────── */
+    .stApp, .stMarkdown, .stText,
+    p, li, h1, h2, h3, h4, h5, h6,
+    .stChatMessage, .stChatMessage p,
+    .stCaption, label,
+    .stTabs [data-baseweb="tab"],
+    section[data-testid="stSidebar"] {
+        font-family: 'Montserrat', 'Prompt', sans-serif !important;
+    }
+
+    /* ── Explicitly restore Material Symbols icon font ────────────
+       Streamlit renders icons as <span class="material-symbols-rounded">
+       Restoring here beats any inherited override.
+    ─────────────────────────────────────────────────────────────── */
+    [class*="material-symbols"],
+    [class*="material-icons"],
+    .material-symbols-rounded,
+    .material-symbols-outlined,
+    .material-symbols-sharp,
+    .material-icons,
+    .material-icons-outlined {
+        font-family: 'Material Symbols Rounded', 'Material Icons', sans-serif !important;
+        font-size: inherit;
+    }
+
+    /* Thai characters  → Prompt; Latin characters → Montserrat
+       CSS unicode-range trick: stack Montserrat first (Latin),
+       then Prompt catches Thai automatically as fallback */
+    :root {
+        --font-ui: 'Montserrat', 'Prompt', sans-serif;
+        --font-editor: 'Sarabun', 'Prompt', sans-serif;
+    }
+
+    /* ── Font sizes ──────────────────────────────────────────────────
+       Layout: sidebar ≈ 22vw (compact), center ≈ 47vw (widest),
+       right chat ≈ 31vw (moderate). Base 14px keeps UI compact
+       without being cramped on standard 1080p+ monitors.
+       Thai Prompt renders well at 14-16px.
+    ─────────────────────────────────────────────────────────────── */
+    body { font-size: 14px; }
+
+    /* Headings — size proportional to their hierarchy level */
+    h1 { font-size: 1.45rem !important; font-weight: 700 !important; }
+    h2 { font-size: 1.2rem  !important; font-weight: 600 !important; }
+    h3 { font-size: 1.05rem !important; font-weight: 600 !important; }
+
+    /* ── Sidebar: compact knowledge-sources panel ────────────────
+       Narrower than before — the sidebar holds file lists, note
+       inputs, and web links, not long-form content. 22vw gives
+       enough room for upload widgets and document/note rows while
+       keeping the main workspace as wide as possible.
+       min-width 240px prevents it collapsing on mid-range laptops;
+       max-width 320px stops it from growing too large on ultrawide.
+    ─────────────────────────────────────────────────────────────── */
+    section[data-testid="stSidebar"] {
+        width: 22vw !important;
+        min-width: 240px !important;
+        max-width: 320px !important;
+    }
+    section[data-testid="stSidebar"] > div:first-child {
+        width: 22vw !important;
+        min-width: 240px !important;
+        max-width: 320px !important;
+        padding-top: 1.5rem;
+    }
+
+    /* Sidebar labels, captions & inline text — slightly smaller than
+       main content area; 0.82rem ≈ 11.5px at 14px base, readable  */
+    section[data-testid="stSidebar"] p,
+    section[data-testid="stSidebar"] span,
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] .stCaption {
+        font-size: 0.82rem !important;
+    }
+    /* Sidebar section titles slightly larger for hierarchy */
+    section[data-testid="stSidebar"] strong,
+    section[data-testid="stSidebar"] b {
+        font-size: 0.86rem !important;
+    }
+
+    /* Chat messages — 0.9rem ≈ 12.6px; comfortable for reading
+       multi-line Thai/English conversation bubbles             */
+    .stChatMessage p, .stChatMessage span {
+        font-size: 0.9rem !important;
+        line-height: 1.75 !important;
+    }
+    /* Chat captions (token count, cost) */
+    .stChatMessage .stCaption {
+        font-size: 0.75rem !important;
+    }
+
+    /* ── Text Editor & ALL text inputs/textareas → TH Sarabun ───
+       Sarabun has tight Thai letterforms that work well at 14-16px
+    ─────────────────────────────────────────────────────────────── */
+    textarea,
+    textarea[data-testid="stTextArea"],
+    .stTextArea textarea,
+    input[type="text"],
+    .stTextInput input,
+    input[data-testid="stTextInput"],
+    /* chat input */
+    .stChatInputContainer textarea,
+    div[data-testid="stChatInput"] textarea {
+        font-family: 'Sarabun', 'Prompt', sans-serif !important;
+        font-size: 14px !important;
+        line-height: 1.8 !important;
+    }
+
+    /* Main editor content area — one step up from base for comfortable
+       long-form writing; Sarabun 15px reads well in Thai & English   */
+    .stTextArea textarea {
+        font-size: 15px !important;
+        line-height: 1.85 !important;
+        letter-spacing: 0.01em;
+    }
+
+    /* Title input — medium weight, matches editor body size */
+    .stTextInput input {
+        font-size: 14px !important;
+        font-weight: 500 !important;
+    }
+
+    /* ── Think block ──────────────────────────────────────────────── */
     .think-block {
         background-color: #f0f4f8;
         border-left: 4px solid #90a4ae;
@@ -445,20 +587,39 @@ def main():
         margin-bottom: 8px;
         color: #546e7a;
         font-style: italic;
-        font-size: 0.9em;
+        font-size: 0.88em;
         white-space: pre-wrap;
+        font-family: var(--font-ui) !important;
     }
+
     .section-header {
         font-size: 1.1rem;
         font-weight: 600;
         margin-bottom: 0.5rem;
         color: #1f2937;
+        font-family: var(--font-ui) !important;
     }
 
-    /* ── Sidebar: push content down to align with main panel ── */
-    section[data-testid="stSidebar"] > div:first-child {
-        padding-top: 1.5rem;
+    /* ── Right panel (Assistant): slightly compact text ─────────────
+       The right chat panel is ~40% of the main area (narrower than
+       the editor). 0.88rem ≈ 12.3px at 14px base keeps chat bubbles
+       readable while fitting comfortably in the moderate-width column.
+    ─────────────────────────────────────────────────────────────── */
+    div[data-testid="stColumns"] > div[data-testid="column"]:last-child p,
+    div[data-testid="stColumns"] > div[data-testid="column"]:last-child span,
+    div[data-testid="stColumns"] > div[data-testid="column"]:last-child label,
+    div[data-testid="stColumns"] > div[data-testid="column"]:last-child .stMarkdown {
+        font-size: 0.88rem !important;
     }
+    /* Panel header (Assistant title) keeps its own inline style; skip */
+    /* Restore icon fonts inside right panel — never inherit text override */
+    div[data-testid="stColumns"] > div[data-testid="column"]:last-child [class*="material-symbols"],
+    div[data-testid="stColumns"] > div[data-testid="column"]:last-child [class*="material-icons"] {
+        font-family: 'Material Symbols Rounded', 'Material Icons', sans-serif !important;
+        font-size: inherit !important;
+    }
+
+    /* ── Sidebar: markdown headings ── */
     section[data-testid="stSidebar"] .stMarkdown h3 {
         margin-top: 0;
         margin-bottom: 0.4rem;
@@ -469,16 +630,36 @@ def main():
         margin-top: -0.5rem;
     }
 
-    /* ── Editor toolbar buttons: smaller, uniform look ── */
-    .stButton > button {
-        font-size: 0.85rem;
-        padding-top: 0.35rem;
-        padding-bottom: 0.35rem;
-    }
+    /* ── Buttons: Prompt/Montserrat, consistent size ── */
+    .stButton > button,
     .stDownloadButton > button {
-        font-size: 0.85rem;
-        padding-top: 0.35rem;
-        padding-bottom: 0.35rem;
+        font-family: 'Montserrat', 'Prompt', sans-serif !important;
+        font-size: 0.82rem !important;   /* ≈ 11.5px — clear at small widths */
+        font-weight: 500 !important;
+        padding-top: 0.3rem;
+        padding-bottom: 0.3rem;
+    }
+
+    /* Selectbox, radio options — 0.86rem keeps dropdowns readable */
+    .stSelectbox div[data-baseweb="select"] *,
+    .stRadio label span {
+        font-family: var(--font-ui) !important;
+        font-size: 0.86rem !important;
+    }
+
+    /* st.caption / helper text — slightly muted, smaller */
+    .stCaption {
+        font-size: 0.75rem !important;
+        color: #6b7280;
+    }
+
+    /* Metric values in session usage — keep prominent */
+    [data-testid="stMetricValue"] {
+        font-size: 1.1rem !important;
+        font-weight: 600 !important;
+    }
+    [data-testid="stMetricLabel"] {
+        font-size: 0.75rem !important;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -793,9 +974,7 @@ def main():
                                 )
 
                                 total_tokens_turn = total_input_tokens + total_output_tokens
-                                cost_thb = (total_tokens_turn / 1_000_000) * 0.4 * 35
                                 st.session_state.total_tokens += total_tokens_turn
-                                st.session_state.total_cost_thb += cost_thb
 
                                 status.update(label="เสร็จสิ้น", state="complete")
                                 st.success(f"บันทึกแล้ว — **{auto_title}**")
@@ -843,6 +1022,10 @@ def main():
     # ============================================================================
     # MAIN CONTENT: Center (Research Workbench) | Right (Assistant)
     # ============================================================================
+    # Column ratio 3:2 — editor (center) gets 60 %, chat (right) gets 40 %
+    # of the main content area. With the sidebar narrowed to ~22vw the main
+    # area is ~78vw, so center ≈ 47vw and right ≈ 31vw — a natural hierarchy:
+    # sidebar (compact) < right chat (moderate) < editor (widest).
     col_center, col_right = st.columns([3, 2], gap="large")
 
     # ── Center: Research Workbench ─────────────────────────────────────────────────────
@@ -1086,18 +1269,7 @@ def main():
 
         # ── Session usage stats ────────────────────────────────────────────────
         with st.expander("📈 Session Usage", expanded=False):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.metric("Total Tokens", f"{st.session_state.total_tokens:,}")
-            with c2:
-                st.metric("Total Cost", f"฿{st.session_state.total_cost_thb:.4f}")
-            with c3:
-                avg = (
-                    (st.session_state.total_cost_thb
-                     / st.session_state.total_tokens * 1_000_000)
-                    if st.session_state.total_tokens > 0 else 0
-                )
-                st.metric("Per 1M Tokens", f"฿{avg:.4f}")
+            st.metric("Total Tokens", f"{st.session_state.total_tokens:,}")
 
     # ── Right: Assistant Chat ─────────────────────────────────────────────────
     with col_right:
@@ -1127,10 +1299,7 @@ def main():
                                 st.caption("✏️ แก้ไขเอกสารแล้ว")
                             display_assistant_message(message["content"])
                             if "tokens" in message:
-                                st.caption(
-                                    f"⏱️ {message['tokens']} tokens "
-                                    f"| ฿{message['cost_thb']:.4f}"
-                                )
+                                st.caption(f"⏱️ {message['tokens']} tokens")
                             if "sources" in message:
                                 with st.expander("📚 แหล่งข้อมูล"):
                                     for i, doc in enumerate(message["sources"], 1):
@@ -1242,6 +1411,78 @@ def main():
             overlay.addEventListener('click', (e) => { if (e.target === overlay) _removeEditOverlay(); });
         };
 
+        // ── Content Insert: right-click without selection → floating insert box ──
+        const _removeInsertOverlay = () => {
+            const el = parent.document.getElementById('__ciOverlay');
+            if (el) el.remove();
+        };
+
+        const _showInsertOverlay = (x, y, cursorPos) => {
+            _removeInsertOverlay();
+            const overlay = parent.document.createElement('div');
+            overlay.id = '__ciOverlay';
+            overlay.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:999999;background:rgba(0,0,0,0.12);';
+
+            const boxW = 350;
+            let bx = Math.min(x + 4, parent.innerWidth - boxW - 16);
+            let by = Math.min(y + 4, parent.innerHeight - 220);
+            bx = Math.max(8, bx); by = Math.max(8, by);
+
+            overlay.innerHTML = `
+            <div style="position:fixed;left:${bx}px;top:${by}px;width:${boxW}px;background:#fff;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.2);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow:hidden;border:1px solid #e0e0e0;">
+                <div style="background:linear-gradient(135deg,#43e97b 0%,#38f9d7 100%);color:#fff;padding:10px 16px;font-weight:600;font-size:14px;display:flex;justify-content:space-between;align-items:center;">
+                    <span>&#10133; Insert</span>
+                    <span id="__ciClose" style="cursor:pointer;font-size:18px;opacity:0.8;">&#10005;</span>
+                </div>
+                <div style="padding:12px 16px;">
+                    <div style="font-size:12px;color:#888;margin-bottom:8px;">แทรกข้อความที่ตำแหน่ง cursor</div>
+                    <input type="text" id="__ciInput" placeholder="อธิบายว่าต้องการแทรกข้อความอะไร..."
+                        style="width:100%;box-sizing:border-box;padding:9px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:13px;outline:none;"
+                    />
+                    <div style="display:flex;gap:8px;margin-top:10px;">
+                        <button id="__ciSubmit" style="flex:1;padding:9px;border:none;border-radius:8px;background:linear-gradient(135deg,#43e97b 0%,#38f9d7 100%);color:#fff;font-weight:600;cursor:pointer;font-size:13px;">แทรก</button>
+                        <button id="__ciCancel" style="flex:1;padding:9px;border:1.5px solid #ddd;border-radius:8px;background:#fff;color:#555;cursor:pointer;font-size:13px;">ยกเลิก</button>
+                    </div>
+                </div>
+            </div>`;
+
+            parent.document.body.appendChild(overlay);
+            setTimeout(() => {
+                const inp = parent.document.getElementById('__ciInput');
+                if (inp) inp.focus();
+            }, 50);
+
+            // Submit handler
+            parent.document.getElementById('__ciSubmit').addEventListener('click', () => {
+                const instruction = parent.document.getElementById('__ciInput').value.trim();
+                if (!instruction) return;
+                const cmd = '__INSERT__' + JSON.stringify({pos: cursorPos, i: instruction});
+                const chatTA = parent.document.querySelector('textarea[data-testid="stChatInputTextArea"]');
+                if (chatTA) {
+                    const nset = Object.getOwnPropertyDescriptor(
+                        window.HTMLTextAreaElement.prototype, 'value'
+                    ).set;
+                    nset.call(chatTA, cmd);
+                    chatTA.dispatchEvent(new Event('input', {bubbles: true}));
+                    setTimeout(() => {
+                        const btn = parent.document.querySelector('button[data-testid="stChatInputSubmitButton"]');
+                        if (btn) btn.click();
+                    }, 150);
+                }
+                _removeInsertOverlay();
+            });
+
+            // Enter key submits
+            parent.document.getElementById('__ciInput').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') parent.document.getElementById('__ciSubmit').click();
+            });
+
+            // Cancel / close
+            parent.document.getElementById('__ciCancel').addEventListener('click', _removeInsertOverlay);
+            parent.document.getElementById('__ciClose').addEventListener('click', _removeInsertOverlay);
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) _removeInsertOverlay(); });
+        };
+
         // ── Event Delegation: ผูก listener เดียวที่ parent.document ──
         // ลบ listener เก่าออกก่อน (ป้องกันทับซ้อนเมื่อ st.rerun() สร้าง iframe ใหม่)
         if (parent.window._customContextMenuListener) {
@@ -1253,8 +1494,13 @@ def main():
             if (ta && ta.tagName === 'TEXTAREA' && ta.placeholder && ta.placeholder.includes('Start writing')) {
                 const sel = ta.value.substring(ta.selectionStart, ta.selectionEnd);
                 if (sel.trim().length > 0) {
+                    // มี highlight → Edit mode
                     e.preventDefault();
                     _showEditOverlay(e.clientX, e.clientY, sel);
+                } else {
+                    // ไม่มี highlight → Insert mode
+                    e.preventDefault();
+                    _showInsertOverlay(e.clientX, e.clientY, ta.selectionStart);
                 }
             }
         };
@@ -1406,15 +1652,12 @@ def main():
                             st.session_state.work_content_val = new_content
 
                             total_tokens_turn = ri + ro
-                            cost_thb = (total_tokens_turn / 1_000_000) * 0.4 * 35
                             st.session_state.total_tokens += total_tokens_turn
-                            st.session_state.total_cost_thb += cost_thb
 
                             st.session_state.messages.append({
                                 "role": "assistant",
                                 "content": f"📝 เขียนส่วน \"{final_instruction[:60]}\" เสร็จแล้ว — ต่อท้ายใน editor",
                                 "tokens": total_tokens_turn,
-                                "cost_thb": cost_thb,
                                 "action": "edit",
                             })
                             st.rerun()
@@ -1482,9 +1725,7 @@ def main():
                             user_focus=review_focus,
                         )
                         total_tokens_turn = ri + ro
-                        cost_thb = (total_tokens_turn / 1_000_000) * 0.4 * 35
                         st.session_state.total_tokens += total_tokens_turn
-                        st.session_state.total_cost_thb += cost_thb
                         st.session_state.review_result = review_text
                         st.session_state.review_expanded = True
                         st.rerun()
@@ -1498,11 +1739,6 @@ def main():
                     edit_data = json.loads(prompt[8:])
                     selected = edit_data["s"]
                     instruction = edit_data["i"]
-
-                    st.session_state.messages.append({
-                        "role": "user",
-                        "content": f"✏️ แก้ไขข้อความ: {instruction}",
-                    })
 
                     with _chat_spinner_area, st.spinner("✏️ กำลังแก้ไขข้อความที่เลือก..."):
                         edited, ri, ro = generate_selection_edit(
@@ -1523,10 +1759,12 @@ def main():
                             st.session_state["_highlight_sel"] = (edit_start, edit_start + len(edited))
 
                         total_tokens_turn = ri + ro
-                        cost_thb = (total_tokens_turn / 1_000_000) * 0.4 * 35
                         st.session_state.total_tokens += total_tokens_turn
-                        st.session_state.total_cost_thb += cost_thb
 
+                        st.session_state.messages.append({
+                            "role": "user",
+                            "content": f"✏️ แก้ไขข้อความ: {instruction}",
+                        })
                         st.session_state.messages.append({
                             "role": "assistant",
                             "content": (
@@ -1534,7 +1772,6 @@ def main():
                                 f"คำสั่ง: {instruction}"
                             ),
                             "tokens": total_tokens_turn,
-                            "cost_thb": cost_thb,
                             "action": "edit",
                         })
                     st.rerun()
@@ -1542,6 +1779,55 @@ def main():
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": f"❌ เกิดข้อผิดพลาดในการแก้ไข: {str(e)}"
+                    })
+                    st.rerun()
+
+            # ── Detect content insert command from right-click overlay ─────
+            elif prompt.startswith("__INSERT__"):
+                try:
+                    insert_data = json.loads(prompt[10:])
+                    cursor_pos = insert_data["pos"]
+                    instruction = insert_data["i"]
+
+                    with _chat_spinner_area, st.spinner("➕ กำลังสร้างข้อความแทรก..."):
+                        context_before = work_content[:cursor_pos]
+                        context_after = work_content[cursor_pos:]
+                        inserted, ri, ro = generate_insertion(
+                            context_before, context_after, instruction
+                        )
+                        new_content = context_before + inserted + context_after
+
+                        st.session_state.ai_edit_undo_stack.append(work_content)
+                        if len(st.session_state.ai_edit_undo_stack) > 20:
+                            st.session_state.ai_edit_undo_stack.pop(0)
+                        st.session_state.ai_edit_redo_stack = []
+                        st.session_state["_pending_work_content"] = new_content
+                        st.session_state.work_content_val = new_content
+
+                        # Highlight inserted text after rerun
+                        st.session_state["_highlight_sel"] = (cursor_pos, cursor_pos + len(inserted))
+
+                        total_tokens_turn = ri + ro
+                        st.session_state.total_tokens += total_tokens_turn
+
+                        st.session_state.messages.append({
+                            "role": "user",
+                            "content": f"➕ แทรกข้อความ: {instruction}",
+                        })
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": (
+                                f"➕ แทรกข้อความเรียบร้อยแล้ว\n\n"
+                                f"คำสั่ง: {instruction}"
+                            ),
+                            "tokens": total_tokens_turn,
+                            "action": "edit",
+                        })
+                    st.rerun()
+                except Exception as e:
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": f"❌ เกิดข้อผิดพลาดในการแทรก: {str(e)}"
                     })
                     st.rerun()
 
@@ -1586,17 +1872,13 @@ def main():
                     )
 
                     total_tokens_turn = input_tokens + output_tokens
-                    cost_thb = (total_tokens_turn / 1_000_000) * 0.4 * 35
-
                     st.session_state.total_tokens += total_tokens_turn
-                    st.session_state.total_cost_thb += cost_thb
 
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": response_text,
                         "sources": retrieved_docs,
                         "tokens": total_tokens_turn,
-                        "cost_thb": cost_thb,
                         "action": action,
                     })
 

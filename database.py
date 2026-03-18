@@ -181,6 +181,25 @@ def save_parent_chunk(parent_id: str, content: str, source_file: str = None,
         conn.commit()
 
 
+def save_parent_chunks_batch(records: list):
+    """Save multiple parent chunks in a single transaction.
+
+    Args:
+        records: list of dicts with keys: id, content, source_file, page_number, section
+    """
+    if not records:
+        return
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.executemany(
+            'INSERT OR REPLACE INTO parent_chunks (id, content, source_file, page_number, section) '
+            'VALUES (?, ?, ?, ?, ?)',
+            [(r['id'], r['content'], r.get('source_file'), r.get('page_number'), r.get('section'))
+             for r in records]
+        )
+        conn.commit()
+
+
 def get_parent_chunk(parent_id: str) -> dict | None:
     """Retrieve a parent chunk by ID. Returns dict or None."""
     with get_db_connection() as conn:

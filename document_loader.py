@@ -100,6 +100,23 @@ def load_pdf_document(pdf_path):
         raise Exception(f"❌ Error loading PDF: {str(e)}")
 
 
+_splitter_cache = {}
+
+
+def _get_splitter(chunk_size, chunk_overlap, separators=None):
+    """Return a cached RecursiveCharacterTextSplitter for the given params."""
+    if separators is None:
+        separators = ["\n\n", "\n", " ", ""]
+    key = (chunk_size, chunk_overlap, tuple(separators))
+    if key not in _splitter_cache:
+        _splitter_cache[key] = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=separators,
+        )
+    return _splitter_cache[key]
+
+
 def chunk_documents(documents, chunk_size=1000, chunk_overlap=200):
     """
     Split documents into overlapping chunks for better embedding context.
@@ -121,11 +138,7 @@ def chunk_documents(documents, chunk_size=1000, chunk_overlap=200):
         raise ValueError("❌ No documents provided for chunking")
 
     try:
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            separators=["\n\n", "\n", " ", ""]
-        )
+        text_splitter = _get_splitter(chunk_size, chunk_overlap)
 
         chunked_documents = text_splitter.split_documents(documents)
 
@@ -144,30 +157,32 @@ def chunk_documents(documents, chunk_size=1000, chunk_overlap=200):
 
 # ── Advanced RAG: Rich Metadata ──────────────────────────────────────────────
 
+_SECTION_PATTERNS = [
+    (re.compile(r'\babstract\b'), 'abstract'),
+    (re.compile(r'\bintroduction\b'), 'introduction'),
+    (re.compile(r'\bliterature\s+review\b'), 'literature_review'),
+    (re.compile(r'\brelated\s+work\b'), 'related_work'),
+    (re.compile(r'\bmethodology\b|\bmethod\b|\bmethods\b'), 'methodology'),
+    (re.compile(r'\bresults?\b'), 'results'),
+    (re.compile(r'\bdiscussion\b'), 'discussion'),
+    (re.compile(r'\bconclusion\b'), 'conclusion'),
+    (re.compile(r'\breferences?\b|\bbibliography\b'), 'references'),
+    (re.compile(r'\backnowledg'), 'acknowledgements'),
+    (re.compile(r'\bappendix\b|\bappendices\b'), 'appendix'),
+    (re.compile(r'\bบทคัดย่อ\b'), 'abstract'),
+    (re.compile(r'\bบทนำ\b'), 'introduction'),
+    (re.compile(r'\bวิธีการ\b|\bระเบียบวิธี\b'), 'methodology'),
+    (re.compile(r'\bผลการ\b'), 'results'),
+    (re.compile(r'\bสรุป\b'), 'conclusion'),
+    (re.compile(r'\bเอกสารอ้างอิง\b|\bบรรณานุกรม\b'), 'references'),
+]
+
+
 def _detect_section(text: str) -> str:
     """Detect common academic paper sections from text content."""
     text_lower = text[:200].lower().strip()
-    section_patterns = [
-        (r'\babstract\b', 'abstract'),
-        (r'\bintroduction\b', 'introduction'),
-        (r'\bliterature\s+review\b', 'literature_review'),
-        (r'\brelated\s+work\b', 'related_work'),
-        (r'\bmethodology\b|\bmethod\b|\bmethods\b', 'methodology'),
-        (r'\bresults?\b', 'results'),
-        (r'\bdiscussion\b', 'discussion'),
-        (r'\bconclusion\b', 'conclusion'),
-        (r'\breferences?\b|\bbibliography\b', 'references'),
-        (r'\backnowledg', 'acknowledgements'),
-        (r'\bappendix\b|\bappendices\b', 'appendix'),
-        (r'\bบทคัดย่อ\b', 'abstract'),
-        (r'\bบทนำ\b', 'introduction'),
-        (r'\bวิธีการ\b|\bระเบียบวิธี\b', 'methodology'),
-        (r'\bผลการ\b', 'results'),
-        (r'\bสรุป\b', 'conclusion'),
-        (r'\bเอกสารอ้างอิง\b|\bบรรณานุกรม\b', 'references'),
-    ]
-    for pattern, section in section_patterns:
-        if re.search(pattern, text_lower):
+    for pattern, section in _SECTION_PATTERNS:
+        if pattern.search(text_lower):
             return section
     return 'body'
 
@@ -280,21 +295,20 @@ def create_parent_child_chunks(documents: list, filename: str,
     total_chars = sum(len(doc.page_content) for doc in documents)
     child_size, child_overlap = get_adaptive_chunk_params(total_chars)
 
-    child_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=child_size,
-        chunk_overlap=child_overlap,
-        separators=["\n\n", "\n", "。", ".", " ", ""]
+    child_splitter = _get_splitter(
+        child_size, child_overlap,
+        separators=["\n\n", "\n", "\u3002", ".", " ", ""],
     )
 
-    child_documents = []
     parent_records = []
+    today = date.today().isoformat()
 
+    # Tag each doc with its parent_id before batch splitting
     for doc in documents:
+        parent_id = f"parent_{uuid.uuid4().hex[:12]}"
         page_num = doc.metadata.get('page', 0)
         section = doc.metadata.get('section', 'body')
 
-        # Parent = the full page content
-        parent_id = f"parent_{uuid.uuid4().hex[:12]}"
         parent_records.append({
             'id': parent_id,
             'content': doc.page_content,
@@ -303,24 +317,31 @@ def create_parent_child_chunks(documents: list, filename: str,
             'section': section,
         })
 
-        # Children = small chunks from this page
-        children = child_splitter.split_documents([doc])
-        for child in children:
-            child.metadata['parent_id'] = parent_id
-            child.metadata['chunk_type'] = 'child'
-            child.metadata['source_type'] = source_type
-            child.metadata['doc_name'] = filename
-            child.metadata['created_at'] = date.today().isoformat()
-            if user_id:
-                child.metadata['user_id'] = user_id
-            if project_id:
-                child.metadata['project_id'] = project_id
+        # Temporarily inject parent_id so children inherit it
+        doc.metadata['_parent_id'] = parent_id
 
-        child_documents.extend(children)
+    # Batch split all documents at once (avoids per-doc overhead)
+    all_children = child_splitter.split_documents(documents)
 
-    print(f"✓ Parent-Child chunking: {len(parent_records)} parents, "
-          f"{len(child_documents)} children (child_size={child_size})")
-    return child_documents, parent_records
+    # Enrich child metadata
+    for child in all_children:
+        child.metadata['parent_id'] = child.metadata.pop('_parent_id')
+        child.metadata['chunk_type'] = 'child'
+        child.metadata['source_type'] = source_type
+        child.metadata['doc_name'] = filename
+        child.metadata['created_at'] = today
+        if user_id:
+            child.metadata['user_id'] = user_id
+        if project_id:
+            child.metadata['project_id'] = project_id
+
+    # Clean up temp key from parent docs
+    for doc in documents:
+        doc.metadata.pop('_parent_id', None)
+
+    print(f"\u2713 Parent-Child chunking: {len(parent_records)} parents, "
+          f"{len(all_children)} children (child_size={child_size})")
+    return all_children, parent_records
 
 
 def create_summary_documents(documents: list, filename: str,

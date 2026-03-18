@@ -129,15 +129,8 @@ def ingest_documents(vector_store, child_chunks: list, parent_records: list,
         parent_records: List of dicts from create_parent_child_chunks()
         summary_docs: Optional list of summary Document objects
     """
-    # Save parent chunks to SQLite
-    for parent in parent_records:
-        database.save_parent_chunk(
-            parent_id=parent['id'],
-            content=parent['content'],
-            source_file=parent.get('source_file'),
-            page_number=parent.get('page_number'),
-            section=parent.get('section'),
-        )
+    # Save parent chunks to SQLite (batch for performance)
+    database.save_parent_chunks_batch(parent_records)
     print(f"✓ Saved {len(parent_records)} parent chunks to SQLite")
 
     # Add child chunks to ChromaDB
