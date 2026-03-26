@@ -24,6 +24,7 @@ def get_db_connection():
             cursor = conn.cursor()
             ...
     """
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     try:
         yield conn
