@@ -2,11 +2,12 @@
 Research Workbench — AI-Powered RAG with Text Notes
 3-panel layout: Sidebar (Docs + Notes) | Center (Research Workbench) | Right (Assistant chat)
 
-Key improvements in this version:
-- Unified single ChromaDB collection separated by metadata (source_type)
+Key features in this version:
+- Pinecone vector database with per-user namespace isolation
+- Google OAuth 2.0 login with splash screen
 - Advanced RAG: rich metadata, parent-child chunking, summary embeddings
 - Adaptive chunk sizing based on content length
-- MMR-based retrieval with parent expansion for full-context answers
+- Retrieval with parent expansion for full-context answers
 - @st.cache_resource on embeddings; @st.cache_data on note loading
 """
 
@@ -23,6 +24,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 import database
+from auth import get_google_auth_url, handle_oauth_callback
 from document_loader import (
     load_document, chunk_documents,
     enrich_metadata, create_parent_child_chunks, create_summary_documents,
@@ -31,14 +33,14 @@ from generator import generate_answer, generate_selection_edit, generate_inserti
 from reviewer import review_research
 from web_scraper import scrape_url, summarize_content, generate_title, prepare_web_chunks
 from vector_store import (
-    initialize_embeddings,
-    get_or_create_vector_store,
+    get_embedding_model,
+    get_pinecone_index,
+    upsert_documents,
     ingest_documents,
     ingest_note,
     retrieve_unified,
-    retrieve_from_both_stores,
-    UNIFIED_DB_PATH,
-    UNIFIED_COLLECTION,
+    delete_document,
+    delete_by_metadata,
 )
 
 
@@ -180,24 +182,131 @@ def _render_review_result(review_text: str):
     _flush()
 
 
-# ── Unified vector-store helpers ──────────────────────────────────────────────
+# ============================================================================
+# LOGIN PAGE — Google OAuth Splash Screen
+# ============================================================================
 
-def _load_unified_vector_store(embeddings):
-    """Load (or initialise) the persistent unified ChromaDB."""
-    return get_or_create_vector_store(
-        db_path=UNIFIED_DB_PATH,
-        chunked_documents=None,
-        embeddings=embeddings,
-        collection_name=UNIFIED_COLLECTION,
-    )
+def _show_login_page():
+    """Render the login splash screen with Google Sign-In button."""
+    import base64
+    import pathlib
+
+    # Load banner image
+    _banner_path = pathlib.Path(__file__).parent / "pic" / "banner.jpeg"
+    _b64 = ""
+    if _banner_path.exists():
+        _b64 = base64.b64encode(_banner_path.read_bytes()).decode()
+
+    # Google SVG logo (inline)
+    google_svg = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="20" height="20"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>'''
+
+    auth_url = get_google_auth_url()
+
+    st.markdown(f"""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;600;700&family=Montserrat:wght@400;600;700&display=swap');
+    [data-testid="stAppViewContainer"] {{
+        background: linear-gradient(135deg, #f8faff 0%, #eef2ff 50%, #f0f4ff 100%);
+    }}
+    .login-container {{
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 85vh;
+        font-family: 'Montserrat', 'Prompt', sans-serif;
+        animation: fadeIn 0.8s ease-out both;
+    }}
+    @keyframes fadeIn {{
+        from {{ opacity: 0; transform: translateY(20px); }}
+        to {{ opacity: 1; transform: translateY(0); }}
+    }}
+    .login-card {{
+        background: #ffffff;
+        border-radius: 20px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.08);
+        padding: 48px 40px;
+        text-align: center;
+        max-width: 440px;
+        width: 100%;
+    }}
+    .login-banner {{
+        max-width: 320px;
+        border-radius: 12px;
+        margin-bottom: 24px;
+    }}
+    .login-title {{
+        font-family: 'Montserrat', sans-serif;
+        font-size: 2.2rem;
+        font-weight: 700;
+        color: #1e293b;
+        margin: 0 0 8px 0;
+        letter-spacing: -0.02em;
+    }}
+    .login-subtitle {{
+        font-family: 'Prompt', sans-serif;
+        font-size: 1rem;
+        font-weight: 300;
+        color: #64748b;
+        margin: 0 0 32px 0;
+        letter-spacing: 0.02em;
+    }}
+    .google-btn {{
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 32px;
+        background: #ffffff;
+        border: 2px solid #e2e8f0;
+        border-radius: 12px;
+        font-family: 'Montserrat', sans-serif;
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: #334155;
+        text-decoration: none;
+        transition: all 0.2s ease;
+        cursor: pointer;
+    }}
+    .google-btn:hover {{
+        border-color: #4285F4;
+        box-shadow: 0 4px 16px rgba(66, 133, 244, 0.15);
+        transform: translateY(-1px);
+        color: #1e293b;
+        text-decoration: none;
+    }}
+    .login-footer {{
+        font-family: 'Prompt', sans-serif;
+        font-size: 0.75rem;
+        color: #94a3b8;
+        margin-top: 24px;
+    }}
+    /* Hide Streamlit default elements on login page */
+    header[data-testid="stHeader"] {{ display: none; }}
+    #MainMenu {{ display: none; }}
+    footer {{ display: none; }}
+    </style>
+
+    <div class="login-container">
+        <div class="login-card">
+            {"<img class='login-banner' src='data:image/jpeg;base64," + _b64 + "' />" if _b64 else ""}
+            <h1 class="login-title">WijaiWai</h1>
+            <p class="login-subtitle">AI-Powered Research Assistant</p>
+            <a href="{auth_url}" class="google-btn">
+                {google_svg}
+                Sign in with Google
+            </a>
+            <p class="login-footer">Secure authentication powered by Google OAuth 2.0</p>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # ============================================================================
-# Web Edit Dialog — แก้ไขชื่อเว็บเพจ + อัปเดต ChromaDB metadata
+# Web Edit Dialog
 # ============================================================================
 
 @st.dialog("แก้ไขชื่อ")
-def _show_web_edit_dialog(web_page_id: int):
+def _show_web_edit_dialog(web_page_id: int, user_id: str):
     """Pop-up สำหรับแก้ไขชื่อเว็บเพจ"""
     wp = database.get_web_page_by_id(web_page_id)
     if wp is None:
@@ -242,33 +351,10 @@ def _show_web_edit_dialog(web_page_id: int):
             try:
                 # อัปเดตชื่อใน SQLite
                 database.update_web_page_title(web_page_id, edit_title.strip())
-
-                # อัปเดต paper_title ใน ChromaDB metadata
-                if st.session_state.unified_vector_store is not None:
-                    collection = st.session_state.unified_vector_store._collection
-                    try:
-                        results = collection.get(
-                            where={"web_page_id": web_page_id},
-                            include=["metadatas"]
-                        )
-                    except Exception:
-                        results = collection.get(
-                            where={"doc_name": wp['url']},
-                            include=["metadatas"]
-                        )
-                    if results and results['ids']:
-                        updated = []
-                        for meta in results['metadatas']:
-                            meta['paper_title'] = edit_title.strip()
-                            updated.append(meta)
-                        collection.update(
-                            ids=results['ids'],
-                            metadatas=updated
-                        )
-
+                # Note: Pinecone metadata updates require re-upserting
+                # For simplicity, title update is SQLite-only
                 del st.session_state._web_edit_id
                 st.rerun()
-
             except Exception as e:
                 st.error(f"เกิดข้อผิดพลาด: {str(e)}")
 
@@ -288,10 +374,38 @@ def main():
         layout="wide"
     )
 
+    # ── Initialize session state for auth ─────────────────────────────────────
+    if "user" not in st.session_state:
+        st.session_state.user = None
+
+    # ── Handle OAuth callback ─────────────────────────────────────────────────
+    query_params = st.query_params
+    auth_code = query_params.get("code")
+
+    if auth_code and st.session_state.user is None:
+        try:
+            user_info = handle_oauth_callback(auth_code)
+            st.session_state.user = user_info
+            # Clear the code from URL
+            st.query_params.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(f"Login failed: {str(e)}")
+            st.query_params.clear()
+            st.stop()
+
+    # ── Login gate: show login page if not authenticated ──────────────────────
+    if st.session_state.user is None:
+        _show_login_page()
+        st.stop()
+
+    # ── User is authenticated — proceed with main app ─────────────────────────
+    user = st.session_state.user
+    user_id = user["id"]
+
     # ── Session state defaults ─────────────────────────────────────────────────
     defaults = {
-        "unified_vector_store": None,   # Single unified ChromaDB for docs + notes
-        "processed_docs": [              # Restored from SQLite on startup
+        "processed_docs": [
             {"name": d["filename"], "chunks": d["chunk_count"], "doc_id": d["id"]}
             for d in database.load_all_documents()
         ],
@@ -307,19 +421,18 @@ def main():
         "work_save_dialog": None,
         "work_save_dialog_name": "",
         "work_import_open": False,
-        "_unified_store_initialised": False,
         "_app_initialized": False,
         "_research_mode": False,
-        "ai_edit_undo_stack": [],   # list of editor content snapshots (before AI edits)
-        "ai_edit_redo_stack": [],   # list of editor content snapshots (after undone AI edits)
-        "review_result": None,      # latest advisor review output text
-        "review_expanded": True,    # whether review result is expanded
+        "ai_edit_undo_stack": [],
+        "ai_edit_redo_stack": [],
+        "review_result": None,
+        "review_expanded": True,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
-    # ── Banner image (used by splash, loading, and top banner) ──────────────
+    # ── Banner image (used by splash and top banner) ──────────────────────────
     import base64, pathlib
     _banner_path = pathlib.Path(__file__).parent / "pic" / "banner.jpeg"
     _b64 = base64.b64encode(_banner_path.read_bytes()).decode()
@@ -399,21 +512,18 @@ def main():
 
             progress = st.progress(0, text="เริ่มต้นระบบ...")
 
-            # Step 1: Load embeddings model (~400MB)
+            # Step 1: Load embeddings model
             progress.progress(15, text="📦 กำลังโหลด Embedding Model...")
-            embeddings = initialize_embeddings()
+            embedding_model = get_embedding_model()
             progress.progress(60, text="✅ โหลด Embedding Model สำเร็จ")
 
-            # Step 2: Load unified vector store
-            progress.progress(70, text="📝 กำลังโหลดฐานข้อมูล Vector Store...")
-            if not st.session_state._unified_store_initialised:
-                if os.path.exists(UNIFIED_DB_PATH):
-                    try:
-                        st.session_state.unified_vector_store = _load_unified_vector_store(embeddings)
-                    except Exception:
-                        st.session_state.unified_vector_store = None
-                st.session_state._unified_store_initialised = True
-            progress.progress(90, text="✅ โหลดฐานข้อมูล Vector Store สำเร็จ")
+            # Step 2: Connect to Pinecone
+            progress.progress(70, text="📝 กำลังเชื่อมต่อ Pinecone...")
+            try:
+                get_pinecone_index()
+                progress.progress(90, text="✅ เชื่อมต่อ Pinecone สำเร็จ")
+            except Exception as e:
+                progress.progress(90, text=f"⚠️ Pinecone: {str(e)[:50]}")
 
             # Step 3: Finalize
             progress.progress(100, text="✅ พร้อมใช้งาน!")
@@ -424,14 +534,14 @@ def main():
         # Clear loading screen and mark as initialized
         loading.empty()
         st.session_state._app_initialized = True
-        st.session_state._cached_embeddings = embeddings
+        st.session_state._cached_embeddings = embedding_model
         st.rerun()
 
     # ── App already initialized — retrieve cached embeddings ──────────────────
-    embeddings = st.session_state.get("_cached_embeddings")
-    if embeddings is None:
-        embeddings = initialize_embeddings()
-        st.session_state._cached_embeddings = embeddings
+    embedding_model = st.session_state.get("_cached_embeddings")
+    if embedding_model is None:
+        embedding_model = get_embedding_model()
+        st.session_state._cached_embeddings = embedding_model
 
     # Apply pending editor content BEFORE any widget is rendered
     for widget_key, pending_key in [
@@ -481,35 +591,17 @@ def main():
         font-size: inherit;
     }
 
-    /* Thai characters  → Prompt; Latin characters → Montserrat
-       CSS unicode-range trick: stack Montserrat first (Latin),
-       then Prompt catches Thai automatically as fallback */
     :root {
         --font-ui: 'Montserrat', 'Prompt', sans-serif;
         --font-editor: 'Sarabun', 'Prompt', sans-serif;
     }
 
-    /* ── Font sizes ──────────────────────────────────────────────────
-       Layout: sidebar ≈ 22vw (compact), center ≈ 47vw (widest),
-       right chat ≈ 31vw (moderate). Base 14px keeps UI compact
-       without being cramped on standard 1080p+ monitors.
-       Thai Prompt renders well at 14-16px.
-    ─────────────────────────────────────────────────────────────── */
     body { font-size: 14px; }
 
-    /* Headings — size proportional to their hierarchy level */
     h1 { font-size: 1.45rem !important; font-weight: 700 !important; }
     h2 { font-size: 1.2rem  !important; font-weight: 600 !important; }
     h3 { font-size: 1.05rem !important; font-weight: 600 !important; }
 
-    /* ── Sidebar: compact knowledge-sources panel ────────────────
-       Narrower than before — the sidebar holds file lists, note
-       inputs, and web links, not long-form content. 22vw gives
-       enough room for upload widgets and document/note rows while
-       keeping the main workspace as wide as possible.
-       min-width 240px prevents it collapsing on mid-range laptops;
-       max-width 320px stops it from growing too large on ultrawide.
-    ─────────────────────────────────────────────────────────────── */
     section[data-testid="stSidebar"] {
         width: 22vw !important;
         min-width: 240px !important;
@@ -522,41 +614,31 @@ def main():
         padding-top: 1.5rem;
     }
 
-    /* Sidebar labels, captions & inline text — slightly smaller than
-       main content area; 0.82rem ≈ 11.5px at 14px base, readable  */
     section[data-testid="stSidebar"] p,
     section[data-testid="stSidebar"] span,
     section[data-testid="stSidebar"] label,
     section[data-testid="stSidebar"] .stCaption {
         font-size: 0.82rem !important;
     }
-    /* Sidebar section titles slightly larger for hierarchy */
     section[data-testid="stSidebar"] strong,
     section[data-testid="stSidebar"] b {
         font-size: 0.86rem !important;
     }
 
-    /* Chat messages — 0.9rem ≈ 12.6px; comfortable for reading
-       multi-line Thai/English conversation bubbles             */
     .stChatMessage p, .stChatMessage span {
         font-size: 0.9rem !important;
         line-height: 1.75 !important;
     }
-    /* Chat captions (token count, cost) */
     .stChatMessage .stCaption {
         font-size: 0.75rem !important;
     }
 
-    /* ── Text Editor & ALL text inputs/textareas → TH Sarabun ───
-       Sarabun has tight Thai letterforms that work well at 14-16px
-    ─────────────────────────────────────────────────────────────── */
     textarea,
     textarea[data-testid="stTextArea"],
     .stTextArea textarea,
     input[type="text"],
     .stTextInput input,
     input[data-testid="stTextInput"],
-    /* chat input */
     .stChatInputContainer textarea,
     div[data-testid="stChatInput"] textarea {
         font-family: 'Sarabun', 'Prompt', sans-serif !important;
@@ -564,21 +646,17 @@ def main():
         line-height: 1.8 !important;
     }
 
-    /* Main editor content area — one step up from base for comfortable
-       long-form writing; Sarabun 15px reads well in Thai & English   */
     .stTextArea textarea {
         font-size: 15px !important;
         line-height: 1.85 !important;
         letter-spacing: 0.01em;
     }
 
-    /* Title input — medium weight, matches editor body size */
     .stTextInput input {
         font-size: 14px !important;
         font-weight: 500 !important;
     }
 
-    /* ── Think block ──────────────────────────────────────────────── */
     .think-block {
         background-color: #f0f4f8;
         border-left: 4px solid #90a4ae;
@@ -600,60 +678,47 @@ def main():
         font-family: var(--font-ui) !important;
     }
 
-    /* ── Right panel (Assistant): slightly compact text ─────────────
-       The right chat panel is ~40% of the main area (narrower than
-       the editor). 0.88rem ≈ 12.3px at 14px base keeps chat bubbles
-       readable while fitting comfortably in the moderate-width column.
-    ─────────────────────────────────────────────────────────────── */
     div[data-testid="stColumns"] > div[data-testid="column"]:last-child p,
     div[data-testid="stColumns"] > div[data-testid="column"]:last-child span,
     div[data-testid="stColumns"] > div[data-testid="column"]:last-child label,
     div[data-testid="stColumns"] > div[data-testid="column"]:last-child .stMarkdown {
         font-size: 0.88rem !important;
     }
-    /* Panel header (Assistant title) keeps its own inline style; skip */
-    /* Restore icon fonts inside right panel — never inherit text override */
     div[data-testid="stColumns"] > div[data-testid="column"]:last-child [class*="material-symbols"],
     div[data-testid="stColumns"] > div[data-testid="column"]:last-child [class*="material-icons"] {
         font-family: 'Material Symbols Rounded', 'Material Icons', sans-serif !important;
         font-size: inherit !important;
     }
 
-    /* ── Sidebar: markdown headings ── */
     section[data-testid="stSidebar"] .stMarkdown h3 {
         margin-top: 0;
         margin-bottom: 0.4rem;
     }
 
-    /* ── Compact buttons: reduce gap between button rows ── */
     div[data-testid="stColumns"] + div[data-testid="stColumns"] {
         margin-top: -0.5rem;
     }
 
-    /* ── Buttons: Prompt/Montserrat, consistent size ── */
     .stButton > button,
     .stDownloadButton > button {
         font-family: 'Montserrat', 'Prompt', sans-serif !important;
-        font-size: 0.82rem !important;   /* ≈ 11.5px — clear at small widths */
+        font-size: 0.82rem !important;
         font-weight: 500 !important;
         padding-top: 0.3rem;
         padding-bottom: 0.3rem;
     }
 
-    /* Selectbox, radio options — 0.86rem keeps dropdowns readable */
     .stSelectbox div[data-baseweb="select"] *,
     .stRadio label span {
         font-family: var(--font-ui) !important;
         font-size: 0.86rem !important;
     }
 
-    /* st.caption / helper text — slightly muted, smaller */
     .stCaption {
         font-size: 0.75rem !important;
         color: #6b7280;
     }
 
-    /* Metric values in session usage — keep prominent */
     [data-testid="stMetricValue"] {
         font-size: 1.1rem !important;
         font-weight: 600 !important;
@@ -665,9 +730,35 @@ def main():
     """, unsafe_allow_html=True)
 
     # ============================================================================
-    # SIDEBAR — Documents + Notes tabs
+    # SIDEBAR — User Profile + Documents + Notes tabs
     # ============================================================================
     with st.sidebar:
+        # ── User profile & logout ─────────────────────────────────────────
+        col_user, col_logout = st.columns([4, 1])
+        with col_user:
+            user_display = user.get("name", user.get("email", "User"))
+            picture_url = user.get("picture", "")
+            if picture_url:
+                st.markdown(
+                    f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">'
+                    f'<img src="{picture_url}" style="width:28px;height:28px;border-radius:50%;"/>'
+                    f'<span style="font-size:0.85rem;font-weight:500;color:#374151;">{user_display}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(f"**{user_display}**")
+        with col_logout:
+            if st.button("🚪", key="logout_btn", help="Logout"):
+                st.session_state.user = None
+                st.session_state._app_initialized = False
+                for key in list(st.session_state.keys()):
+                    if key != "user":
+                        del st.session_state[key]
+                st.rerun()
+
+        st.divider()
+
         st.markdown("""
         <div style="font-size:1.35rem;font-weight:700;color:#1f2937;padding:0.25rem 0 0.4rem 0;">
             📚 แหล่งข้อมูล
@@ -729,7 +820,7 @@ def main():
                                     filename=uploaded_file.name,
                                     file_type=ext.lstrip('.'),
                                     chunk_count=len(child_chunks),
-                                    db_path=UNIFIED_DB_PATH,
+                                    db_path="pinecone",
                                 )
                                 # Inject doc_id into child chunk metadata
                                 for chunk in child_chunks:
@@ -752,20 +843,13 @@ def main():
 
                         if all_child_chunks:
                             try:
-                                # Ensure unified store exists
-                                if st.session_state.unified_vector_store is None:
-                                    st.session_state.unified_vector_store = get_or_create_vector_store(
-                                        db_path=UNIFIED_DB_PATH,
-                                        embeddings=embeddings,
-                                        collection_name=UNIFIED_COLLECTION,
-                                    )
-
-                                # Ingest everything into unified collection
+                                # Ingest into Pinecone under user's namespace
                                 ingest_documents(
-                                    st.session_state.unified_vector_store,
                                     all_child_chunks,
                                     all_parent_records,
+                                    user_id,
                                     all_summary_docs,
+                                    embedding_model,
                                 )
 
                                 st.session_state.processed_docs.extend(new_doc_entries)
@@ -791,15 +875,11 @@ def main():
                     with col_del:
                         if st.button("🗑️", key=f"del_doc_{doc_entry['name']}",
                                      help="Delete this document"):
-                            # Remove chunks from unified ChromaDB by doc_name metadata
-                            if st.session_state.unified_vector_store is not None:
-                                try:
-                                    st.session_state.unified_vector_store \
-                                        ._collection.delete(
-                                            where={"doc_name": doc_entry["name"]}
-                                        )
-                                except Exception as e:
-                                    st.error(f"VectorDB delete error: {e}")
+                            # Remove chunks from Pinecone
+                            try:
+                                delete_document(doc_entry["name"], user_id)
+                            except Exception as e:
+                                st.error(f"VectorDB delete error: {e}")
                             # Remove parent chunks from SQLite
                             database.delete_parent_chunks_by_source(doc_entry["name"])
                             # Remove document metadata from SQLite
@@ -838,11 +918,10 @@ def main():
                         note_id = database.save_note(
                             note_title_input, note_content_input
                         )
-                        # Embed into the unified collection with source_type='note'
-                        st.session_state.unified_vector_store = ingest_note(
-                            st.session_state.unified_vector_store,
+                        # Embed into Pinecone with source_type='note'
+                        ingest_note(
                             note_id, note_title_input, note_content_input,
-                            embeddings,
+                            user_id, embedding_model,
                         )
                     st.success(f"✅ Saved '{note_title_input}' (ID: {note_id})")
                     st.session_state.note_title_val = ""
@@ -853,7 +932,7 @@ def main():
 
             st.divider()
 
-            # ── Saved notes list with Delete buttons (same style as docs) ────
+            # ── Saved notes list with Delete buttons ────
             notes = database.load_all_notes()
             if notes:
                 st.caption(f"{len(notes)} note(s) saved")
@@ -867,15 +946,11 @@ def main():
                                      help="Delete this note"):
                             # 1. Remove from SQLite
                             database.delete_note_by_id(note['id'])
-                            # 2. Remove from unified ChromaDB
-                            if st.session_state.unified_vector_store is not None:
-                                try:
-                                    st.session_state.unified_vector_store \
-                                        ._collection.delete(
-                                            where={"note_id": note['id']}
-                                        )
-                                except Exception as e:
-                                    st.error(f"VectorDB delete error: {e}")
+                            # 2. Remove from Pinecone
+                            try:
+                                delete_by_metadata("note_id", note['id'], user_id)
+                            except Exception as e:
+                                st.error(f"VectorDB delete error: {e}")
                             st.rerun()
                     # Content preview in a collapsed expander below the row
                     with st.expander("ดูเนื้อหา", expanded=False):
@@ -955,17 +1030,11 @@ def main():
                                     web_page_id=web_page_id,
                                 )
 
-                                if st.session_state.unified_vector_store is None:
-                                    st.session_state.unified_vector_store = get_or_create_vector_store(
-                                        db_path=UNIFIED_DB_PATH,
-                                        embeddings=embeddings,
-                                        collection_name=UNIFIED_COLLECTION,
-                                    )
-
                                 ingest_documents(
-                                    st.session_state.unified_vector_store,
                                     child_chunks,
                                     parent_records,
+                                    user_id,
+                                    embedding_model=embedding_model,
                                 )
 
                                 database.update_web_page(
@@ -1001,14 +1070,10 @@ def main():
                     with col_del:
                         if st.button("🗑️", key=f"del_web_{wp['id']}",
                                      help="ลบออก"):
-                            if st.session_state.unified_vector_store is not None:
-                                try:
-                                    st.session_state.unified_vector_store \
-                                        ._collection.delete(
-                                            where={"doc_name": wp['url']}
-                                        )
-                                except Exception:
-                                    pass
+                            try:
+                                delete_document(wp['url'], user_id)
+                            except Exception:
+                                pass
                             database.delete_parent_chunks_by_source(wp['url'])
                             database.delete_web_page_by_id(wp['id'])
                             st.rerun()
@@ -1016,16 +1081,12 @@ def main():
             # ── Pop-up แก้ไขชื่อ ──
             _web_edit_id = st.session_state.get("_web_edit_id")
             if _web_edit_id is not None:
-                _show_web_edit_dialog(_web_edit_id)
+                _show_web_edit_dialog(_web_edit_id, user_id)
 
 
     # ============================================================================
     # MAIN CONTENT: Center (Research Workbench) | Right (Assistant)
     # ============================================================================
-    # Column ratio 3:2 — editor (center) gets 60 %, chat (right) gets 40 %
-    # of the main content area. With the sidebar narrowed to ~22vw the main
-    # area is ~78vw, so center ≈ 47vw and right ≈ 31vw — a natural hierarchy:
-    # sidebar (compact) < right chat (moderate) < editor (widest).
     col_center, col_right = st.columns([3, 2], gap="large")
 
     # ── Center: Research Workbench ─────────────────────────────────────────────────────
@@ -1107,15 +1168,15 @@ def main():
                 elif not final_instruction:
                     st.warning("⚠️ กรุณาระบุส่วนที่ต้องการเขียน หรือเลือกจาก preset")
                 else:
-                    _sec_store = st.session_state.unified_vector_store
                     retrieved = []
-                    if _sec_store is not None:
-                        try:
-                            retrieved = retrieve_unified(
-                                _sec_store, f"{sec_topic} {final_instruction}", k=3
-                            )
-                        except Exception as e:
-                            st.warning(f"⚠️ ไม่สามารถดึงบริบทจากเอกสารได้: {e}")
+                    try:
+                        retrieved = retrieve_unified(
+                            f"{sec_topic} {final_instruction}",
+                            user_id, k=3,
+                            embedding_model=embedding_model,
+                        )
+                    except Exception as e:
+                        st.warning(f"⚠️ ไม่สามารถดึงบริบทจากเอกสารได้: {e}")
 
                     with st.spinner(f"✍️ กำลังเขียน: {final_instruction[:50]}..."):
                         try:
@@ -1237,8 +1298,6 @@ def main():
         with c_clear:
             clear_editor_clicked = st.button("🗑️ Clear",
                                              key="clear_editor_btn", use_container_width=True)
-
-        # (Long-Form Generator moved to right panel)
 
         # ── Button logic ───────────────────────────────────────────────────────
         if save_clicked:
@@ -1414,9 +1473,6 @@ def main():
             <span style="font-size:1.35rem;font-weight:700;color:#1f2937;">Assistant</span>
         </div>""", unsafe_allow_html=True)
 
-        unified_store = st.session_state.unified_vector_store
-        has_context = unified_store is not None
-
         # ── Chat container (compact) — show only after first interaction ──
         if st.session_state.messages:
             chat_container = st.container(height=300)
@@ -1448,7 +1504,7 @@ def main():
                         else:
                             st.write(message["content"])
 
-        # Placeholder for spinner — sits right below chat container, above chat input
+        # Placeholder for spinner
         _chat_spinner_area = st.empty()
 
         # ── JS helpers: widget warnings + content edit overlay ─────────────
@@ -1614,8 +1670,7 @@ def main():
             overlay.addEventListener('click', (e) => { if (e.target === overlay) _removeInsertOverlay(); });
         };
 
-        // ── Event Delegation: ผูก listener เดียวที่ parent.document ──
-        // ลบ listener เก่าออกก่อน (ป้องกันทับซ้อนเมื่อ st.rerun() สร้าง iframe ใหม่)
+        // ── Event Delegation ──
         if (parent.window._customContextMenuListener) {
             parent.document.removeEventListener('contextmenu', parent.window._customContextMenuListener);
         }
@@ -1625,11 +1680,9 @@ def main():
             if (ta && ta.tagName === 'TEXTAREA' && ta.placeholder && ta.placeholder.includes('Start writing')) {
                 const sel = ta.value.substring(ta.selectionStart, ta.selectionEnd);
                 if (sel.trim().length > 0) {
-                    // มี highlight → Edit mode
                     e.preventDefault();
                     _showEditOverlay(e.clientX, e.clientY, sel);
                 } else {
-                    // ไม่มี highlight → Insert mode
                     e.preventDefault();
                     _showInsertOverlay(e.clientX, e.clientY, ta.selectionStart);
                 }
@@ -1653,7 +1706,6 @@ def main():
                         if (ta.placeholder && ta.placeholder.includes('Start writing')) {{
                             ta.focus();
                             ta.setSelectionRange({_hl_start}, {_hl_end});
-                            // Scroll to the selection
                             const lineHeight = parseInt(getComputedStyle(ta).lineHeight) || 20;
                             const approxLine = ta.value.substring(0, {_hl_start}).split('\\n').length;
                             ta.scrollTop = Math.max(0, (approxLine - 3) * lineHeight);
@@ -1662,7 +1714,6 @@ def main():
                     }}
                     return false;
                 }};
-                // Retry a few times to handle Streamlit render timing
                 let tries = 0;
                 const iv = setInterval(() => {{
                     if (_highlightEdited() || ++tries > 10) clearInterval(iv);
@@ -1716,7 +1767,6 @@ def main():
                         st.session_state["_pending_work_content"] = new_content
                         st.session_state.work_content_val = new_content
 
-                        # Store position of edited text for post-rerun highlight
                         edit_start = new_content.find(edited)
                         if edit_start >= 0:
                             st.session_state["_highlight_sel"] = (edit_start, edit_start + len(edited))
@@ -1767,7 +1817,6 @@ def main():
                         st.session_state["_pending_work_content"] = new_content
                         st.session_state.work_content_val = new_content
 
-                        # Highlight inserted text after rerun
                         st.session_state["_highlight_sel"] = (cursor_pos, cursor_pos + len(inserted))
 
                         total_tokens_turn = ri + ro
@@ -1794,89 +1843,86 @@ def main():
                     })
                     st.rerun()
 
-            # ── Detect mode: toggle or /research prefix ────────────────────
-            is_research = st.session_state._research_mode
-            actual_query = prompt
-            # /research prefix still works as override
-            if re.match(r'^/research\b\s*', prompt, re.IGNORECASE):
-                is_research = True
-                actual_query = re.sub(r'^/research\s*', '', prompt, flags=re.IGNORECASE).strip()
-                st.session_state._research_mode = True
+            # ── Normal chat / research mode ────────────────────────────────
+            else:
+                is_research = st.session_state._research_mode
+                actual_query = prompt
+                if re.match(r'^/research\b\s*', prompt, re.IGNORECASE):
+                    is_research = True
+                    actual_query = re.sub(r'^/research\s*', '', prompt, flags=re.IGNORECASE).strip()
+                    st.session_state._research_mode = True
 
-            # If /research was typed alone with no query, just toggle mode on
-            if is_research and not actual_query:
-                st.session_state._research_mode = True
-                st.rerun()
+                if is_research and not actual_query:
+                    st.session_state._research_mode = True
+                    st.rerun()
 
-            st.session_state.messages.append({
-                "role": "user",
-                "content": actual_query,
-                "research": is_research,
-            })
+                st.session_state.messages.append({
+                    "role": "user",
+                    "content": actual_query,
+                    "research": is_research,
+                })
 
-            spinner_text = "🔬 กำลังค้นคว้าเชิงลึก..." if is_research else "Analyzing..."
-            with _chat_spinner_area, st.spinner(spinner_text):
-                try:
-                    chat_history = st.session_state.messages[:-1]
+                spinner_text = "🔬 กำลังค้นคว้าเชิงลึก..." if is_research else "Analyzing..."
+                with _chat_spinner_area, st.spinner(spinner_text):
+                    try:
+                        chat_history = st.session_state.messages[:-1]
 
-                    # Retrieve from unified collection (with parent expansion)
-                    retrieval_k = 5 if is_research else 3
-                    retrieved_docs = retrieve_unified(
-                        unified_store, actual_query, k=retrieval_k,
-                        expand_parents=True,
-                    )
-
-                    action, response_text, new_editor_content, input_tokens, output_tokens = (
-                        generate_answer(
-                            actual_query, retrieved_docs, chat_history,
-                            editor_content=work_content,
-                            research_mode=is_research,
+                        # Retrieve from Pinecone (with parent expansion)
+                        retrieval_k = 5 if is_research else 3
+                        retrieved_docs = retrieve_unified(
+                            actual_query, user_id, k=retrieval_k,
+                            expand_parents=True,
+                            embedding_model=embedding_model,
                         )
-                    )
 
-                    total_tokens_turn = input_tokens + output_tokens
-                    st.session_state.total_tokens += total_tokens_turn
+                        action, response_text, new_editor_content, input_tokens, output_tokens = (
+                            generate_answer(
+                                actual_query, retrieved_docs, chat_history,
+                                editor_content=work_content,
+                                research_mode=is_research,
+                            )
+                        )
 
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": response_text,
-                        "sources": retrieved_docs,
-                        "tokens": total_tokens_turn,
-                        "action": action,
-                    })
+                        total_tokens_turn = input_tokens + output_tokens
+                        st.session_state.total_tokens += total_tokens_turn
 
-                    # Push new content into the editor for edit/research actions
-                    if action in ("edit", "research") and new_editor_content:
-                        # Snapshot current content for undo (cap stack at 20)
-                        st.session_state.ai_edit_undo_stack.append(work_content)
-                        if len(st.session_state.ai_edit_undo_stack) > 20:
-                            st.session_state.ai_edit_undo_stack.pop(0)
-                        st.session_state.ai_edit_redo_stack = []
-                        st.session_state["_pending_work_content"] = new_editor_content
-                        st.session_state.work_content_val = new_editor_content
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": response_text,
+                            "sources": retrieved_docs,
+                            "tokens": total_tokens_turn,
+                            "action": action,
+                        })
 
-                except ValueError as e:
-                    # API errors (invalid key, quota, HTTP errors) from generator.py
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": str(e),
-                    })
-                except requests.exceptions.Timeout:
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": "❌ การเชื่อมต่อ API หมดเวลา กรุณาลองใหม่อีกครั้ง",
-                    })
-                except requests.exceptions.ConnectionError:
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": "❌ ไม่สามารถเชื่อมต่อ API ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต",
-                    })
-                except Exception as e:
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": f"❌ เกิดข้อผิดพลาด: {str(e)}",
-                    })
-            st.rerun()
+                        if action in ("edit", "research") and new_editor_content:
+                            st.session_state.ai_edit_undo_stack.append(work_content)
+                            if len(st.session_state.ai_edit_undo_stack) > 20:
+                                st.session_state.ai_edit_undo_stack.pop(0)
+                            st.session_state.ai_edit_redo_stack = []
+                            st.session_state["_pending_work_content"] = new_editor_content
+                            st.session_state.work_content_val = new_editor_content
+
+                    except ValueError as e:
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": str(e),
+                        })
+                    except requests.exceptions.Timeout:
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": "❌ การเชื่อมต่อ API หมดเวลา กรุณาลองใหม่อีกครั้ง",
+                        })
+                    except requests.exceptions.ConnectionError:
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": "❌ ไม่สามารถเชื่อมต่อ API ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต",
+                        })
+                    except Exception as e:
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": f"❌ เกิดข้อผิดพลาด: {str(e)}",
+                        })
+                st.rerun()
 
 
 if __name__ == "__main__":

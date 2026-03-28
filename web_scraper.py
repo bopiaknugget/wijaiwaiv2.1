@@ -327,7 +327,7 @@ def prepare_web_chunks(summary: str, title: str, url: str,
                        source_type: str = "web_page",
                        web_page_id: int = 0) -> tuple:
     """
-    เตรียม chunks จากเนื้อหาที่สรุปแล้ว สำหรับบันทึกลง ChromaDB
+    เตรียม chunks จากเนื้อหาที่สรุปแล้ว สำหรับบันทึกลง vector store
     ใช้ระบบ Parent-Child Chunking เหมือนกับเอกสารทั่วไป
 
     Args:

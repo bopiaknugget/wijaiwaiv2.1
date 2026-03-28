@@ -63,7 +63,7 @@ def initialize_database():
         ''')
 
         # Parent chunks table for Parent-Child Chunking (Advanced RAG)
-        # Child chunks in ChromaDB reference parent_id to retrieve larger context
+        # Child chunks in Pinecone reference parent_id to retrieve larger context
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS parent_chunks (
                 id          TEXT PRIMARY KEY,
@@ -84,6 +84,18 @@ def initialize_database():
                 summary     TEXT NOT NULL,
                 chunk_count INTEGER DEFAULT 0,
                 timestamp   DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Users table for Google OAuth
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id         TEXT PRIMARY KEY,
+                email      TEXT UNIQUE NOT NULL,
+                name       TEXT,
+                picture    TEXT,
+                created_at TEXT,
+                last_login TEXT
             )
         ''')
 
@@ -333,6 +345,58 @@ def get_web_page_by_id(page_id: int) -> dict | None:
             return {
                 'id': row[0], 'url': row[1], 'title': row[2],
                 'summary': row[3], 'chunk_count': row[4], 'timestamp': row[5]
+            }
+        return None
+
+
+# ── Users (Google OAuth) ──────────────────────────────────────────────────────
+
+def save_user(user_info: dict) -> None:
+    """
+    Save or update a Google OAuth user.
+    Uses INSERT OR REPLACE to upsert on the primary key (id).
+
+    Args:
+        user_info: dict with keys: id, email, name, picture
+    """
+    from datetime import datetime
+    now = datetime.now().isoformat()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        # Check if user already exists to preserve created_at
+        cursor.execute('SELECT created_at FROM users WHERE id = ?', (user_info['id'],))
+        row = cursor.fetchone()
+        created_at = row[0] if row else now
+
+        cursor.execute(
+            'INSERT OR REPLACE INTO users (id, email, name, picture, created_at, last_login) '
+            'VALUES (?, ?, ?, ?, ?, ?)',
+            (
+                user_info['id'],
+                user_info['email'],
+                user_info.get('name', ''),
+                user_info.get('picture', ''),
+                created_at,
+                now,
+            )
+        )
+        conn.commit()
+
+
+def get_user(user_id: str) -> dict | None:
+    """Retrieve a user by ID. Returns dict or None."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT id, email, name, picture, created_at, last_login '
+            'FROM users WHERE id = ?',
+            (user_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return {
+                'id': row[0], 'email': row[1], 'name': row[2],
+                'picture': row[3], 'created_at': row[4], 'last_login': row[5],
             }
         return None
 

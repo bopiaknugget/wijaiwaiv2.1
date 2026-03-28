@@ -276,7 +276,7 @@ def create_parent_child_chunks(documents: list, filename: str,
     Create parent-child chunk structure for Advanced RAG.
 
     - Parent chunks: full page/large paragraphs stored in SQLite (for retrieval context)
-    - Child chunks: small sentences stored in ChromaDB (for vector search)
+    - Child chunks: small sentences stored in Pinecone (for vector search)
     - Each child references its parent_id in metadata
 
     Args:
@@ -286,7 +286,7 @@ def create_parent_child_chunks(documents: list, filename: str,
 
     Returns:
         tuple: (child_documents, parent_records)
-            child_documents: list of small Document objects for ChromaDB
+            child_documents: list of small Document objects for Pinecone
             parent_records: list of dicts {id, content, source_file, page_number, section}
     """
     from datetime import date
@@ -359,7 +359,7 @@ def create_summary_documents(documents: list, filename: str,
         generate_summary_fn: Optional callable(text) -> summary_text
 
     Returns:
-        list: Summary Document objects to be added to ChromaDB
+        list: Summary Document objects to be added to the vector store
     """
     from datetime import date
     summary_docs = []
