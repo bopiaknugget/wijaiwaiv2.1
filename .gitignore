@@ -1,6 +1,9 @@
 # Python RAG Project .gitignore
 # Excludes sensitive data, large files, and temporary files
 
+#security file
+.env
+
 # Environment variables and API keys
 .env
 .env.local

@@ -25,23 +25,8 @@ I need you to refactor my current project, **WijaiWai** (an AI Research Assistan
 ## 2. Environment Variables (.env)
 Please use the following configurations for the implementation:
 
-```env
-# Pinecone Configuration
-PINECONE_API_KEY=pcsk_3AwMUG_J527x87sNrotCJ5ebXyFMmR8eJYEZc53WaNrwRwWo7KEGkuyAftMuUc9KGdkhfL
-PINECONE_INDEX_NAME=wijaiwai
-
-# OpenThaiGPT Configuration
-OPENTHAIGPT_API_KEY=LUdgOMQlcdcflzK7OWu5k5SWBC6J6Agq
-OPENTHAIGPT_URL=[http://thaillm.or.th/api/openthaigpt/v1/chat/completions](http://thaillm.or.th/api/openthaigpt/v1/chat/completions)
-
-# Google OAuth Configuration
-GOOGLE_CLIENT_ID=520199895556-coas22gmngre1uejuko3fol6p42155g8.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=***REMOVED***
-GOOGLE_REDIRECT_URI=http://localhost:8501/oauth2callback
 
 
-
-# Pinecone Configuration for WijaiWai (Free Tier)
 
 Based on the requirements for the **WijaiWai** research assistant and the constraints of the Pinecone Free Quota (Starter Plan), the following configuration is recommended for optimal performance with Thai language processing.
 
