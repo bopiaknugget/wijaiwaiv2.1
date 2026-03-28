@@ -3,6 +3,7 @@
 
 #security file
 .env
+fix.md
 
 # Environment variables and API keys
 .env
