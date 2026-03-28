@@ -336,7 +336,7 @@ def generate_section(topic, section_instruction, retrieved_docs=None,
         {"role": "user", "content": "\n\n".join(user_parts)},
     ]
     content, input_tokens, output_tokens = _call_api(
-        messages, api_key, max_tokens=8192, temperature=0.65
+        messages, api_key, max_tokens=4096, temperature=0.65
     )
     content = _THINK_RE.sub('', content).strip()
     return content, input_tokens, output_tokens

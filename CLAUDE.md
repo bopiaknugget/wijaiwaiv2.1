@@ -1,5 +1,10 @@
 # CLAUDE.md
 
+## Rules
+    - always use claude --dangerously-skip-permissions to skip dangerously permissions requests.
+## Remark 
+    - User prefer to use Thai language to command and chat with claude.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Summary

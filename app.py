@@ -1049,6 +1049,137 @@ def main():
             key="work_content_input"
         )
 
+        # ── Section-by-Section: สร้างเนื้อหาวิจัย ────────────────────────
+        with st.expander("📝 สร้างเนื้อหาวิจัย", expanded=False):
+            sec_topic = st.text_input(
+                "หัวข้อเอกสาร",
+                value=work_title if work_title.strip() else "",
+                placeholder="เช่น ผลกระทบของ AI ต่อการศึกษา",
+                key="sec_topic_input",
+            )
+            _input_mode = st.radio(
+                "วิธีระบุส่วนที่ต้องการเขียน",
+                ["เลือกจาก preset", "กำหนดเอง"],
+                horizontal=True,
+                key="sec_input_mode",
+                label_visibility="collapsed",
+            )
+
+            if _input_mode == "เลือกจาก preset":
+                sec_presets = [
+                    "บทที่ 1: บทนำ — ที่มาและความสำคัญ วัตถุประสงค์ ขอบเขต",
+                    "บทที่ 2: ทบทวนวรรณกรรม — ทฤษฎีและงานวิจัยที่เกี่ยวข้อง",
+                    "บทที่ 3: วิธีดำเนินการวิจัย — ประชากร เครื่องมือ การเก็บข้อมูล",
+                    "บทที่ 4: ผลการวิจัย — นำเสนอข้อมูลและการวิเคราะห์",
+                    "บทที่ 5: สรุป อภิปราย และข้อเสนอแนะ",
+                ]
+                preset_choice = st.radio(
+                    "เลือก preset",
+                    sec_presets,
+                    key="sec_preset_select",
+                    label_visibility="collapsed",
+                )
+                sec_instruction = ""
+            else:
+                sec_instruction = st.text_area(
+                    "ส่วนที่ต้องการเขียน",
+                    placeholder=(
+                        "เช่น บทนำ — ที่มาและความสำคัญของปัญหา\n"
+                        "หรือ ทบทวนวรรณกรรม — ทฤษฎีและงานวิจัยที่เกี่ยวข้อง"
+                    ),
+                    height=80,
+                    key="sec_instruction_input",
+                )
+                preset_choice = None
+
+            sec_generate = st.button(
+                "🚀 สร้างเนื้อหา",
+                key="sec_generate_btn",
+                type="primary",
+                use_container_width=True,
+            )
+
+            if sec_generate:
+                final_instruction = preset_choice if preset_choice else sec_instruction.strip()
+
+                if not sec_topic.strip():
+                    st.warning("⚠️ กรุณาระบุหัวข้อเอกสาร")
+                elif not final_instruction:
+                    st.warning("⚠️ กรุณาระบุส่วนที่ต้องการเขียน หรือเลือกจาก preset")
+                else:
+                    _sec_store = st.session_state.unified_vector_store
+                    retrieved = []
+                    if _sec_store is not None:
+                        try:
+                            retrieved = retrieve_unified(
+                                _sec_store, f"{sec_topic} {final_instruction}", k=3
+                            )
+                        except Exception as e:
+                            st.warning(f"⚠️ ไม่สามารถดึงบริบทจากเอกสารได้: {e}")
+
+                    with st.spinner(f"✍️ กำลังเขียน: {final_instruction[:50]}..."):
+                        try:
+                            section_text, ri, ro = generate_section(
+                                topic=sec_topic.strip(),
+                                section_instruction=final_instruction,
+                                retrieved_docs=retrieved,
+                                existing_content=work_content,
+                            )
+
+                            separator = "\n\n" if work_content.strip() else ""
+                            new_content = work_content + separator + section_text
+
+                            st.session_state.ai_edit_undo_stack.append(work_content)
+                            if len(st.session_state.ai_edit_undo_stack) > 20:
+                                st.session_state.ai_edit_undo_stack.pop(0)
+                            st.session_state.ai_edit_redo_stack = []
+                            st.session_state["_pending_work_content"] = new_content
+                            st.session_state.work_content_val = new_content
+
+                            total_tokens_turn = ri + ro
+                            st.session_state.total_tokens += total_tokens_turn
+
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "content": f"📝 เขียนส่วน \"{final_instruction[:60]}\" เสร็จแล้ว — ต่อท้ายใน editor",
+                                "tokens": total_tokens_turn,
+                                "action": "edit",
+                            })
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(f"❌ API Error: {str(e)}")
+                        except Exception as e:
+                            st.error(f"❌ เกิดข้อผิดพลาดในการสร้างเนื้อหา: {str(e)}")
+
+        # ── Advisor Review Section ────────────────────────────────────────
+        with st.expander("🎓 ตรวจงานโดย AI", expanded=False):
+            review_focus = st.text_area(
+                "อยากตรวจอะไรเป็นพิเศษ? (optional)",
+                value="",
+                placeholder="เช่น ตรวจบทที่ 2, ดูการอ้างอิง, ตรวจระเบียบวิธี...",
+                key="review_focus_input",
+                height=80,
+            )
+            if st.button("🎓 ตรวจงาน", type="primary",
+                         key="advisor_review_btn", use_container_width=True):
+                editor_text = st.session_state.get("work_content_input", "")
+                if not editor_text or not editor_text.strip():
+                    st.warning("⚠️ ไม่มีเนื้อหาใน Research Workbench ให้ตรวจ")
+                else:
+                    with st.spinner("🎓 อาจารย์กำลังตรวจงาน..."):
+                        try:
+                            review_text, ri, ro = review_research(
+                                editor_text,
+                                user_focus=review_focus,
+                            )
+                            total_tokens_turn = ri + ro
+                            st.session_state.total_tokens += total_tokens_turn
+                            st.session_state.review_result = review_text
+                            st.session_state.review_expanded = True
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ เกิดข้อผิดพลาด: {str(e)}")
+
         current_file = st.session_state.get("work_current_file")
         if current_file:
             st.caption(f"📄 `{os.path.basename(current_file)}`")
@@ -1264,174 +1395,6 @@ def main():
                              use_container_width=True):
                     st.session_state.review_result = None
                     st.rerun()
-
-        st.divider()
-
-        # ── Section-by-Section: สร้างเนื้อหาวิจัย ────────────────────────
-        with st.expander("📝 สร้างเนื้อหาวิจัย", expanded=False):
-            sec_topic = st.text_input(
-                "หัวข้อเอกสาร",
-                value=work_title if work_title.strip() else "",
-                placeholder="เช่น ผลกระทบของ AI ต่อการศึกษา",
-                key="sec_topic_input",
-            )
-            _input_mode = st.radio(
-                "วิธีระบุส่วนที่ต้องการเขียน",
-                ["เลือกจาก preset", "กำหนดเอง"],
-                horizontal=True,
-                key="sec_input_mode",
-                label_visibility="collapsed",
-            )
-
-            if _input_mode == "เลือกจาก preset":
-                sec_presets = [
-                    "บทที่ 1: บทนำ — ที่มาและความสำคัญ วัตถุประสงค์ ขอบเขต",
-                    "บทที่ 2: ทบทวนวรรณกรรม — ทฤษฎีและงานวิจัยที่เกี่ยวข้อง",
-                    "บทที่ 3: วิธีดำเนินการวิจัย — ประชากร เครื่องมือ การเก็บข้อมูล",
-                    "บทที่ 4: ผลการวิจัย — นำเสนอข้อมูลและการวิเคราะห์",
-                    "บทที่ 5: สรุป อภิปราย และข้อเสนอแนะ",
-                ]
-                preset_choice = st.radio(
-                    "เลือก preset",
-                    sec_presets,
-                    key="sec_preset_select",
-                    label_visibility="collapsed",
-                )
-                sec_instruction = ""
-            else:
-                sec_instruction = st.text_area(
-                    "ส่วนที่ต้องการเขียน",
-                    placeholder=(
-                        "เช่น บทนำ — ที่มาและความสำคัญของปัญหา\n"
-                        "หรือ ทบทวนวรรณกรรม — ทฤษฎีและงานวิจัยที่เกี่ยวข้อง"
-                    ),
-                    height=80,
-                    key="sec_instruction_input",
-                )
-                preset_choice = None
-
-            sec_generate = st.button(
-                "🚀 สร้างเนื้อหา",
-                key="sec_generate_btn",
-                type="primary",
-                use_container_width=True,
-            )
-
-            if sec_generate:
-                final_instruction = preset_choice if preset_choice else sec_instruction.strip()
-
-                if not sec_topic.strip():
-                    st.warning("⚠️ กรุณาระบุหัวข้อเอกสาร")
-                elif not final_instruction:
-                    st.warning("⚠️ กรุณาระบุส่วนที่ต้องการเขียน หรือเลือกจาก preset")
-                else:
-                    _sec_store = st.session_state.unified_vector_store
-                    retrieved = []
-                    if _sec_store is not None:
-                        try:
-                            retrieved = retrieve_unified(
-                                _sec_store, f"{sec_topic} {final_instruction}", k=3
-                            )
-                        except Exception as e:
-                            st.warning(f"⚠️ ไม่สามารถดึงบริบทจากเอกสารได้: {e}")
-
-                    with st.spinner(f"✍️ กำลังเขียน: {final_instruction[:50]}..."):
-                        try:
-                            section_text, ri, ro = generate_section(
-                                topic=sec_topic.strip(),
-                                section_instruction=final_instruction,
-                                retrieved_docs=retrieved,
-                                existing_content=work_content,
-                            )
-
-                            separator = "\n\n" if work_content.strip() else ""
-                            new_content = work_content + separator + section_text
-
-                            st.session_state.ai_edit_undo_stack.append(work_content)
-                            if len(st.session_state.ai_edit_undo_stack) > 20:
-                                st.session_state.ai_edit_undo_stack.pop(0)
-                            st.session_state.ai_edit_redo_stack = []
-                            st.session_state["_pending_work_content"] = new_content
-                            st.session_state.work_content_val = new_content
-
-                            total_tokens_turn = ri + ro
-                            st.session_state.total_tokens += total_tokens_turn
-
-                            st.session_state.messages.append({
-                                "role": "assistant",
-                                "content": f"📝 เขียนส่วน \"{final_instruction[:60]}\" เสร็จแล้ว — ต่อท้ายใน editor",
-                                "tokens": total_tokens_turn,
-                                "action": "edit",
-                            })
-                            st.rerun()
-                        except ValueError as e:
-                            st.error(f"❌ API Error: {str(e)}")
-                        except Exception as e:
-                            st.error(f"❌ เกิดข้อผิดพลาดในการสร้างเนื้อหา: {str(e)}")
-
-        # ── Advisor Review Section ────────────────────────────────────────
-        st.markdown("""
-        <div style="
-            margin-top: 16px;
-            padding: 14px 16px 10px 16px;
-            background: #e0f0ff;
-            border: 1.5px solid #001f5b;
-            border-radius: 12px;
-        ">
-            <div style="font-size: 1.05rem; font-weight: 700; color: #001f5b; margin-bottom: 6px;">
-                🎓 Advisor — ตรวจงานวิจัย
-            </div>
-            <div style="font-size: 0.8rem; color: #334155; margin-bottom: 4px;">
-                อาจารย์ที่ปรึกษา AI จะ review งานใน Research Workbench
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        st.markdown('<div style="margin-top:10px;"></div>', unsafe_allow_html=True)
-
-        review_focus = ""
-        with st.expander("💬 อยากตรวจอะไรเป็นพิเศษ? (optional)", expanded=False):
-            review_focus = st.text_input(
-                "ระบุสิ่งที่อยากให้เน้น review",
-                value="",
-                placeholder="เช่น ตรวจบทที่ 2, ดูการอ้างอิง, ตรวจระเบียบวิธี...",
-                key="review_focus_input",
-                label_visibility="collapsed",
-            )
-
-        st.markdown('<div style="margin-top:6px;"></div>', unsafe_allow_html=True)
-
-        st.markdown("""
-        <style>
-        .st-key-advisor_review_btn button {
-            background-color: #001f5b !important;
-            color: white !important;
-            border: none !important;
-        }
-        .st-key-advisor_review_btn button:hover {
-            background-color: #002d7a !important;
-        }
-        </style>
-        """, unsafe_allow_html=True)
-        if st.button("🎓 ส่งให้อาจารย์ตรวจ", type="primary",
-                     key="advisor_review_btn", use_container_width=True):
-            editor_text = st.session_state.get("work_content_input", "")
-            if not editor_text or not editor_text.strip():
-                st.warning("⚠️ ไม่มีเนื้อหาใน Research Workbench ให้ตรวจ")
-            else:
-                with st.spinner("🎓 อาจารย์กำลังตรวจงาน..."):
-                    try:
-                        review_text, ri, ro = review_research(
-                            editor_text,
-                            user_focus=review_focus,
-                        )
-                        total_tokens_turn = ri + ro
-                        st.session_state.total_tokens += total_tokens_turn
-                        st.session_state.review_result = review_text
-                        st.session_state.review_expanded = True
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ เกิดข้อผิดพลาด: {str(e)}")
 
         st.divider()
 
