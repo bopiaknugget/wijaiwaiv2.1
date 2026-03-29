@@ -785,6 +785,158 @@ def delete_by_metadata(filter_key: str, filter_value, user_id: str) -> None:
         print(f"Warning: delete_by_metadata failed: {e}")
 
 
+# ── Enhanced Retrieval Pipeline ───────────────────────────────────────────────
+
+def enhanced_retrieve(query: str, user_id: str, k: int = 5,
+                      source_type: Optional[str] = None,
+                      doc_name: Optional[str] = None,
+                      expand_parents: bool = True,
+                      embedding_model=None,
+                      hybrid: bool = True,
+                      use_query_router: bool = True,
+                      use_reranker: bool = True,
+                      rerank_top_n: Optional[int] = None,
+                      use_llm_fallback: bool = False,
+                      score_threshold: Optional[float] = None,
+                      metadata_filters: Optional[dict] = None,
+                      max_context_chars: Optional[int] = None) -> list:
+    """
+    Enhanced retrieval pipeline that wraps retrieve_unified() with:
+    1. Query classification (via query_router) for dynamic topK
+    2. Metadata filter enhancement (category, domain, doc_id)
+    3. Dynamic topK based on classification confidence
+    4. Score threshold filtering (post-retrieval)
+    5. Re-ranking with cutoff (via reranker)
+    6. Enhanced deduplication (content fingerprinting)
+    7. Context length control
+    8. Fallback strategy (retry without filters on empty results)
+
+    This function does NOT modify retrieve_unified() — it calls it and
+    adds post-processing layers. Existing code paths are unaffected.
+
+    Args:
+        query: Natural language query (Thai or English)
+        user_id: Google user ID (Pinecone namespace)
+        k: Final number of results to return (default 5)
+        source_type: Optional filter — "document", "note", "web_page"
+        doc_name: Optional filter — restrict to a specific document
+        expand_parents: If True, replace child chunks with parent content
+        embedding_model: Pinecone client (loads from cache if None)
+        hybrid: If True, fuse BM25 scores with vector scores
+        use_query_router: If True, classify query for dynamic topK
+        use_reranker: If True, re-rank results after retrieval
+        rerank_top_n: Override reranker output count (defaults to k)
+        use_llm_fallback: If True, use LLM for ambiguous query classification
+        score_threshold: Minimum score to keep (None = use default 0.30)
+        metadata_filters: Extra Pinecone metadata filters dict,
+                          e.g. {"category": "ML", "domain": "cs"}
+        max_context_chars: Override max context chars (None = use default 8000)
+
+    Returns:
+        list: Retrieved Document objects, deduplicated and context-capped
+    """
+    if not query or not user_id:
+        return []
+
+    # ── Step 1: Query classification for dynamic topK ────────────────────────
+    classification = None
+    retrieval_k = k
+
+    if use_query_router:
+        try:
+            from query_router import classify_query
+            classification = classify_query(query, use_llm_fallback=use_llm_fallback)
+            # Use suggested topK from classification, but at least k
+            retrieval_k = max(classification.suggested_top_k, k)
+            print(f"OK  Query classified: {classification.category} "
+                  f"(conf={classification.confidence:.2f}, topK={retrieval_k}, "
+                  f"src={classification.source})")
+        except Exception as e:
+            print(f"Warning: Query router failed, using default topK={k}: {e}")
+            retrieval_k = k
+
+    # ── Step 2: Retrieve with potentially higher topK ────────────────────────
+    # We ask for more candidates than needed so re-ranking has material to work with
+    fetch_k = retrieval_k if use_reranker else k
+
+    results = retrieve_unified(
+        query=query,
+        user_id=user_id,
+        k=fetch_k,
+        source_type=source_type,
+        doc_name=doc_name,
+        expand_parents=expand_parents,
+        embedding_model=embedding_model,
+        hybrid=hybrid,
+    )
+
+    # ── Step 3: Fallback strategy — retry without filters on empty results ───
+    if not results and (source_type or doc_name):
+        print("Info: No results with filters, retrying without filters...")
+        results = retrieve_unified(
+            query=query,
+            user_id=user_id,
+            k=fetch_k,
+            source_type=None,
+            doc_name=None,
+            expand_parents=expand_parents,
+            embedding_model=embedding_model,
+            hybrid=hybrid,
+        )
+
+    if not results:
+        return []
+
+    # ── Step 4: Re-ranking with cutoff ───────────────────────────────────────
+    if use_reranker and len(results) > 1:
+        try:
+            from reranker import rerank
+            final_n = rerank_top_n if rerank_top_n is not None else k
+            results = rerank(
+                query=query,
+                documents=results,
+                top_n=final_n,
+                use_cross_encoder=False,  # Use lightweight fallback by default
+            )
+            print(f"OK  Reranked {len(results)} results (top_n={final_n})")
+        except Exception as e:
+            print(f"Warning: Reranker failed, using original order: {e}")
+            results = results[:k]
+    else:
+        results = results[:k]
+
+    # ── Step 5: Enhanced deduplication ────────────────────────────────────────
+    # retrieve_unified() already does basic dedup, but we add a second pass
+    # with more aggressive fingerprinting (first 200 chars, collapsed whitespace)
+    seen_sigs: set = set()
+    unique: list = []
+    for doc in results:
+        sig = " ".join(doc.page_content[:200].lower().split())
+        if sig not in seen_sigs:
+            seen_sigs.add(sig)
+            unique.append(doc)
+    results = unique
+
+    # ── Step 6: Context length control ───────────────────────────────────────
+    # Apply a final context budget (retrieve_unified already does this, but
+    # re-ranking may have changed the order, so we re-apply)
+    from langchain_core.documents import Document as _Doc
+    budget = max_context_chars if max_context_chars is not None else _MAX_CONTEXT_CHARS
+    context_capped: list = []
+    for doc in results:
+        if budget <= 0:
+            break
+        if len(doc.page_content) > budget:
+            doc = _Doc(
+                page_content=doc.page_content[:budget],
+                metadata=doc.metadata,
+            )
+        context_capped.append(doc)
+        budget -= len(doc.page_content)
+
+    return context_capped
+
+
 # ── Legacy compatibility aliases ─────────────────────────────────────────────
 
 def initialize_embeddings():

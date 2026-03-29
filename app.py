@@ -46,6 +46,7 @@ from vector_store import (
     ingest_documents,
     ingest_note,
     retrieve_unified,
+    enhanced_retrieve,
     delete_document,
     delete_by_metadata,
 )
@@ -1194,10 +1195,12 @@ def main():
                 else:
                     retrieved = []
                     try:
-                        retrieved = retrieve_unified(
+                        retrieved = enhanced_retrieve(
                             f"{sec_topic} {final_instruction}",
                             user_id, k=3,
                             embedding_model=embedding_model,
+                            use_query_router=True,
+                            use_reranker=True,
                         )
                     except Exception as e:
                         st.warning(f"⚠️ ไม่สามารถดึงบริบทจากเอกสารได้: {e}")
@@ -1931,12 +1934,14 @@ def main():
                     if not is_research and is_small_talk(actual_query):
                         retrieved_docs = []
                     else:
-                        # Retrieve from Pinecone (with parent expansion + hybrid)
+                        # Enhanced retrieval: query classification + reranking + fallback
                         retrieval_k = 5 if is_research else 3
-                        retrieved_docs = retrieve_unified(
+                        retrieved_docs = enhanced_retrieve(
                             actual_query, user_id, k=retrieval_k,
                             expand_parents=True,
                             embedding_model=embedding_model,
+                            use_query_router=True,
+                            use_reranker=True,
                         )
 
                     # ── Response generation ───────────────────────────────────
