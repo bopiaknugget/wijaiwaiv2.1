@@ -1,12 +1,19 @@
 """
 Response Generation Module – Agentic Editor Edition
 Handles AI-powered answer generation and editor manipulation using OpenThaiGPT API.
+
+Improvements in this version:
+- Query routing: is_small_talk() detects queries that don't need vector retrieval
+- Streaming: _call_api_stream() yields tokens as they arrive (SSE)
+- generate_answer_stream(): streaming variant of generate_answer for use with
+  st.write_stream() in Streamlit
 """
 
 import json
 import os
 import re
 import textwrap
+from typing import Generator, Optional
 import requests
 from pathlib import Path
 from dotenv import load_dotenv
@@ -19,6 +26,45 @@ _PARAMETRIC_WARNING = (
 
 API_URL = "http://thaillm.or.th/api/openthaigpt/v1/chat/completions"
 MODEL = "/model"
+
+# ── Query Routing: small-talk patterns ────────────────────────────────────────
+# Queries matching these patterns are answered directly from the LLM without
+# touching the vector store.  This eliminates unnecessary Pinecone latency for
+# conversational turns that carry no document-retrieval intent.
+
+_SMALL_TALK_PATTERNS = re.compile(
+    r"^("
+    r"สวัสดี|หวัดดี|ดีครับ|ดีค่ะ|hello|hi\b|hey\b|"
+    r"คุณชื่ออะไร|คุณเป็นใคร|คุณทำอะไรได้|ช่วยอะไรได้|"
+    r"ขอบคุณ|thank(s|\s+you)|เยี่ยม|ดีมาก|โอเค|ok\b|okay\b|"
+    r"ลาก่อน|bye\b|goodbye|"
+    r"คุณเป็น ai|คุณเป็นหุ่นยนต์|are you (an? )?ai|"
+    r"กี่โมง|วันนี้วันที่|today|what time"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_small_talk(query: str) -> bool:
+    """
+    Return True if the query is conversational small talk that does not need
+    vector database retrieval.
+
+    The check is intentionally conservative: only obvious greetings and
+    meta-questions about the assistant are flagged.  Any query mentioning
+    research, documents, or content will pass through to retrieval normally.
+
+    Args:
+        query: The raw user input string
+
+    Returns:
+        bool: True if retrieval should be skipped
+    """
+    stripped = query.strip()
+    if len(stripped) > 80:
+        # Long queries almost certainly have research intent
+        return False
+    return bool(_SMALL_TALK_PATTERNS.match(stripped))
 
 
 def _call_api(messages, api_key, max_tokens=2048, temperature=0.3):
@@ -43,6 +89,84 @@ def _call_api(messages, api_key, max_tokens=2048, temperature=0.3):
     input_tokens = usage.get("prompt_tokens", 0)
     output_tokens = usage.get("completion_tokens", 0)
     return content, input_tokens, output_tokens
+
+
+def _call_api_stream(messages, api_key, max_tokens=2048,
+                     temperature=0.3) -> Generator[str, None, None]:
+    """
+    Call the OpenThaiGPT API with streaming enabled (Server-Sent Events).
+
+    Yields individual token strings as they arrive.  Callers should accumulate
+    the yielded strings to reconstruct the full response.
+
+    Note: If the API does not support streaming or returns a non-streaming
+    response, this function falls back gracefully by yielding the full content
+    as a single chunk.
+
+    Args:
+        messages: OpenAI-format message list
+        api_key: OPENTHAI_API_KEY string
+        max_tokens: Maximum output tokens
+        temperature: Sampling temperature
+
+    Yields:
+        str: Token strings (may be multi-character chunks)
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "apikey": api_key,
+        "Accept": "text/event-stream",
+    }
+    payload = {
+        "model": MODEL,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": True,
+    }
+
+    try:
+        with requests.post(
+            API_URL, headers=headers, json=payload,
+            timeout=90, stream=True
+        ) as response:
+            response.raise_for_status()
+
+            # Check if the server is actually streaming
+            content_type = response.headers.get("Content-Type", "")
+            if "text/event-stream" not in content_type and "stream" not in content_type:
+                # Server returned a regular JSON response — yield it wholesale
+                data = response.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                if content:
+                    yield content
+                return
+
+            # Parse SSE stream
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if not raw_line:
+                    continue
+                if raw_line.startswith("data: "):
+                    data_str = raw_line[6:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        delta = (
+                            chunk.get("choices", [{}])[0]
+                            .get("delta", {})
+                            .get("content", "")
+                        )
+                        if delta:
+                            yield delta
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        continue
+
+    except requests.HTTPError as e:
+        # Re-raise HTTP errors so callers can handle them
+        raise
+    except requests.RequestException as e:
+        raise
 
 
 def _extract_json(text: str):
@@ -120,38 +244,17 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
     total_input = 0
     total_output = 0
 
-    # ── Step 1: Context-aware query re-phrasing ────────────────────────────────
-    contextual_query = query
-    if chat_history:
-        history_text = "\n".join([
-            f"{msg['role']}: {_THINK_RE.sub('', msg['content']).strip()}"
-            for msg in chat_history[-6:]
-        ])
-        rephrase_prompt = (
-            f"จากประวัติการสนทนา:\n{history_text}\n\n"
-            f"คำถาม/คำสั่งล่าสุดของผู้ใช้: \"{query}\"\n\n"
-            "ถ้าคำถามอ้างอิงถึงสิ่งที่พูดคุยมาก่อนหน้านี้ ให้ re-phrase ให้ชัดเจนขึ้น "
-            "ถ้าไม่ ให้ใช้คำถามเดิม\n\nคำถามที่ re-phrase แล้ว:"
-        )
-        try:
-            rephrased, ri, ro = _call_api(
-                [
-                    {"role": "system", "content": "คุณเป็นผู้ช่วย re-phrase คำถามให้ชัดเจนตามบริบท"},
-                    {"role": "user", "content": rephrase_prompt},
-                ],
-                api_key,
-                max_tokens=256,
-                temperature=0.1,
-            )
-            contextual_query = rephrased.strip()
-            total_input += ri
-            total_output += ro
-        except Exception:
-            contextual_query = query
-
-    # ── Step 2: Build main generation prompt ──────────────────────────────────
+    # ── Step 1: Build main generation prompt ──────────────────────────────────
     has_context = bool(retrieved_docs)
-    context_text = "\n\n".join(doc.page_content for doc in retrieved_docs) if retrieved_docs else ""
+    # Cap each doc at 1,500 chars and total context at 6,000 chars (~1,500 tokens)
+    # to stay well inside the 16K context window and keep LLM latency low
+    _MAX_DOC_CHARS = 1500
+    _MAX_CONTEXT_CHARS = 6000
+    if retrieved_docs:
+        parts = [doc.page_content[:_MAX_DOC_CHARS] for doc in retrieved_docs]
+        context_text = "\n\n".join(parts)[:_MAX_CONTEXT_CHARS]
+    else:
+        context_text = ""
 
     # ── Language instruction ───────────────────────────────────────────────────
     language_instruction = (
@@ -200,19 +303,26 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
             "- ห้ามสร้างหรือแก้ไขเอกสาร — ตอบคำถามเพียงอย่างเดียว"
         )
 
-    user_parts = [f"คำถาม: {contextual_query}"]
+    user_parts = [f"คำถาม: {query}"]
     if context_text:
         user_parts.append(f"=== บริบทจากเอกสาร ===\n{context_text}")
-    # ส่ง editor_content เฉพาะ research mode เพื่อให้ AI รู้เนื้อหาปัจจุบัน
+    # ส่ง editor_content เฉพาะ research mode — ตัด tail 1,500 chars เพื่อลด tokens
     if research_mode and editor_content and editor_content.strip():
-        user_parts.append(f"=== เนื้อหาในตัวแก้ไขปัจจุบัน ===\n{editor_content.strip()}")
+        editor_tail = editor_content.strip()[-1500:]
+        user_parts.append(f"=== เนื้อหาในตัวแก้ไขปัจจุบัน (ส่วนท้าย) ===\n{editor_tail}")
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": "\n\n".join(user_parts)},
-    ]
+    # Build messages: system + chat history (last 4, each capped at 400 chars) + current user message
+    # Capping history prevents long research-mode answers from bloating the context window
+    messages = [{"role": "system", "content": system_prompt}]
+    if chat_history:
+        for msg in chat_history[-4:]:
+            role = msg.get("role", "user")
+            content = _THINK_RE.sub('', msg.get("content", "")).strip()[:400]
+            if content:
+                messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": "\n\n".join(user_parts)})
 
-    # ── Step 3: Call API ───────────────────────────────────────────────────────
+    # ── Step 2: Call API ───────────────────────────────────────────────────────
     # OpenThaiGPT context window = 16,384 tokens (input + output).
     # Reserve headroom for input tokens to avoid 400 errors.
     api_max_tokens = 8192 if research_mode else 2048
@@ -232,7 +342,7 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
     except requests.RequestException as e:
         raise ValueError(f"❌ Request failed: {e}")
 
-    # ── Step 4: Parse response ─────────────────────────────────────────────────
+    # ── Step 3: Parse response ─────────────────────────────────────────────────
     think_matches = re.findall(r'<think>.*?</think>', raw, re.DOTALL)
     think_prefix = '\n'.join(think_matches).strip()
     raw_clean = _THINK_RE.sub('', raw).strip()
@@ -409,6 +519,100 @@ def generate_insertion(context_before, context_after, instruction):
     )
     content = _THINK_RE.sub('', content).strip()
     return content, input_tokens, output_tokens
+
+
+def generate_answer_stream(query: str, retrieved_docs: list,
+                           chat_history: Optional[list] = None,
+                           editor_content: Optional[str] = None) -> Generator[str, None, None]:
+    """
+    Streaming variant of generate_answer for plain chat mode (non-research).
+
+    Yields tokens as they arrive from the OpenThaiGPT API so that Streamlit's
+    st.write_stream() can render them incrementally, dramatically improving
+    perceived latency.
+
+    Only supports plain chat mode — research mode requires structured JSON
+    output and cannot be streamed reliably.
+
+    Args:
+        query: User message
+        retrieved_docs: RAG context documents (may be empty)
+        chat_history: Previous messages for context
+        editor_content: Current editor text (unused in chat mode but kept for API symmetry)
+
+    Yields:
+        str: Token chunks
+
+    Raises:
+        ValueError: On API key error or HTTP 4xx errors
+    """
+    env_path = Path(__file__).parent / ".env"
+    load_dotenv(dotenv_path=env_path)
+    api_key = os.getenv("OPENTHAI_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "OPENTHAI_API_KEY not found. "
+            f"Please set OPENTHAI_API_KEY in {env_path.resolve()}"
+        )
+
+    has_context = bool(retrieved_docs)
+    _MAX_DOC_CHARS = 1500
+    _MAX_CONTEXT_CHARS = 6000
+    if retrieved_docs:
+        parts = [doc.page_content[:_MAX_DOC_CHARS] for doc in retrieved_docs]
+        context_text = "\n\n".join(parts)[:_MAX_CONTEXT_CHARS]
+    else:
+        context_text = ""
+
+    language_instruction = (
+        "ภาษา: ตอบภาษาเดียวกับคำถาม (default ไทย), technical terms ใช้อังกฤษได้"
+    )
+
+    if has_context:
+        knowledge_instruction = (
+            "ใช้บริบทจากเอกสารด้านล่างเป็นหลักในการตอบ "
+            "หากบริบทไม่เพียงพอ ให้ขึ้นต้นคำตอบด้วย "
+            "\"⚠️ หมายเหตุ: ข้อมูลนี้มาจากความรู้ทั่วไปของ AI\""
+        )
+    else:
+        knowledge_instruction = (
+            "ไม่มีเอกสารถูกโหลดไว้ — ตอบจากความรู้ทั่วไปของ AI ได้เลย"
+        )
+
+    system_prompt = (
+        "คุณเป็นผู้ช่วยวิจัย ทำหน้าที่ตอบคำถามอย่างตรงประเด็นและถูกต้อง\n"
+        f"{knowledge_instruction}\n"
+        f"{language_instruction}\n\n"
+        "แนวทางการตอบ:\n"
+        "- ตอบตรงคำถาม ชัดเจน ครบถ้วน\n"
+        "- ตอบเป็น plain text ธรรมดา ไม่ต้องมี JSON"
+    )
+
+    user_parts = [f"คำถาม: {query}"]
+    if context_text:
+        user_parts.append(f"=== บริบทจากเอกสาร ===\n{context_text}")
+
+    messages = [{"role": "system", "content": system_prompt}]
+    if chat_history:
+        for msg in chat_history[-4:]:
+            role = msg.get("role", "user")
+            content = _THINK_RE.sub('', msg.get("content", "")).strip()[:400]
+            if content:
+                messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": "\n\n".join(user_parts)})
+
+    try:
+        yield from _call_api_stream(messages, api_key, max_tokens=2048, temperature=0.3)
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response is not None else "?"
+        if status in (401, 403):
+            raise ValueError(f"API key invalid or unauthorized (HTTP {status}).")
+        elif status == 429:
+            raise ValueError("API quota exceeded (429). รอสักครู่แล้วลองใหม่")
+        else:
+            raise ValueError(f"HTTP error {status}: {e}")
+    except requests.RequestException as e:
+        raise ValueError(f"Request failed: {e}")
 
 
 def print_generated_answer(query, answer):

@@ -29,7 +29,14 @@ from document_loader import (
     load_document, chunk_documents,
     enrich_metadata, create_parent_child_chunks, create_summary_documents,
 )
-from generator import generate_answer, generate_selection_edit, generate_insertion, generate_section
+from generator import (
+    generate_answer,
+    generate_answer_stream,
+    generate_selection_edit,
+    generate_insertion,
+    generate_section,
+    is_small_talk,
+)
 from reviewer import review_research
 from web_scraper import scrape_url, summarize_content, generate_title, prepare_web_chunks
 from vector_store import (
@@ -512,16 +519,16 @@ def main():
 
             progress = st.progress(0, text="เริ่มต้นระบบ...")
 
-            # Step 1: Load embeddings model
-            progress.progress(15, text="📦 กำลังโหลด Embedding Model...")
+            # Step 1: Initialize Pinecone client (used for inference + index)
+            progress.progress(15, text="🔗 กำลังเชื่อมต่อ Pinecone...")
             embedding_model = get_embedding_model()
-            progress.progress(60, text="✅ โหลด Embedding Model สำเร็จ")
+            progress.progress(60, text="✅ เชื่อมต่อ Pinecone Client สำเร็จ")
 
-            # Step 2: Connect to Pinecone
-            progress.progress(70, text="📝 กำลังเชื่อมต่อ Pinecone...")
+            # Step 2: Connect to Pinecone index
+            progress.progress(70, text="📝 กำลังเชื่อมต่อ Pinecone Index...")
             try:
                 get_pinecone_index()
-                progress.progress(90, text="✅ เชื่อมต่อ Pinecone สำเร็จ")
+                progress.progress(90, text="✅ เชื่อมต่อ Pinecone Index สำเร็จ")
             except Exception as e:
                 progress.progress(90, text=f"⚠️ Pinecone: {str(e)[:50]}")
 
@@ -1862,12 +1869,16 @@ def main():
                     "research": is_research,
                 })
 
-                spinner_text = "🔬 กำลังค้นคว้าเชิงลึก..." if is_research else "Analyzing..."
-                with _chat_spinner_area, st.spinner(spinner_text):
-                    try:
-                        chat_history = st.session_state.messages[:-1]
+                try:
+                    chat_history = st.session_state.messages[:-1]
 
-                        # Retrieve from Pinecone (with parent expansion)
+                    # ── Query routing: skip vector DB for small talk ──────────
+                    # is_small_talk() detects greetings / meta-questions so we
+                    # avoid an unnecessary Pinecone round-trip entirely.
+                    if not is_research and is_small_talk(actual_query):
+                        retrieved_docs = []
+                    else:
+                        # Retrieve from Pinecone (with parent expansion + hybrid)
                         retrieval_k = 5 if is_research else 3
                         retrieved_docs = retrieve_unified(
                             actual_query, user_id, k=retrieval_k,
@@ -1875,13 +1886,19 @@ def main():
                             embedding_model=embedding_model,
                         )
 
-                        action, response_text, new_editor_content, input_tokens, output_tokens = (
-                            generate_answer(
-                                actual_query, retrieved_docs, chat_history,
-                                editor_content=work_content,
-                                research_mode=is_research,
+                    # ── Response generation ───────────────────────────────────
+                    if is_research:
+                        # Research mode: must receive structured JSON → use
+                        # blocking call then display result after full response
+                        spinner_text = "🔬 กำลังค้นคว้าเชิงลึก..."
+                        with _chat_spinner_area, st.spinner(spinner_text):
+                            action, response_text, new_editor_content, input_tokens, output_tokens = (
+                                generate_answer(
+                                    actual_query, retrieved_docs, chat_history,
+                                    editor_content=work_content,
+                                    research_mode=True,
+                                )
                             )
-                        )
 
                         total_tokens_turn = input_tokens + output_tokens
                         st.session_state.total_tokens += total_tokens_turn
@@ -1902,26 +1919,53 @@ def main():
                             st.session_state["_pending_work_content"] = new_editor_content
                             st.session_state.work_content_val = new_editor_content
 
-                    except ValueError as e:
+                    else:
+                        # Plain chat mode: stream tokens for low perceived latency.
+                        # st.write_stream() renders tokens as they arrive and
+                        # returns the complete accumulated string when done.
+                        stream_gen = generate_answer_stream(
+                            actual_query, retrieved_docs, chat_history,
+                            editor_content=work_content,
+                        )
+                        with st.chat_message("assistant"):
+                            streamed_text = st.write_stream(stream_gen)
+
+                        # Prepend parametric warning if no RAG context
+                        if not retrieved_docs and not str(streamed_text).startswith("⚠️"):
+                            streamed_text = _PARAMETRIC_WARNING + "\n\n" + str(streamed_text)
+
+                        # Approximate token count: 1 token ≈ 4 chars
+                        approx_tokens = max(1, len(str(streamed_text)) // 4)
+                        st.session_state.total_tokens += approx_tokens
+
                         st.session_state.messages.append({
                             "role": "assistant",
-                            "content": str(e),
+                            "content": str(streamed_text),
+                            "sources": retrieved_docs,
+                            "tokens": approx_tokens,
+                            "action": "chat",
                         })
-                    except requests.exceptions.Timeout:
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": "❌ การเชื่อมต่อ API หมดเวลา กรุณาลองใหม่อีกครั้ง",
-                        })
-                    except requests.exceptions.ConnectionError:
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": "❌ ไม่สามารถเชื่อมต่อ API ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต",
-                        })
-                    except Exception as e:
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": f"❌ เกิดข้อผิดพลาด: {str(e)}",
-                        })
+
+                except ValueError as e:
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": str(e),
+                    })
+                except requests.exceptions.Timeout:
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": "❌ การเชื่อมต่อ API หมดเวลา กรุณาลองใหม่อีกครั้ง",
+                    })
+                except requests.exceptions.ConnectionError:
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": "❌ ไม่สามารถเชื่อมต่อ API ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต",
+                    })
+                except Exception as e:
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": f"❌ เกิดข้อผิดพลาด: {str(e)}",
+                    })
                 st.rerun()
 
 

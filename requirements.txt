@@ -20,9 +20,6 @@ pypdf>=4.0.1
 # Word Document Processing (.docx, .doc)
 docx2txt>=0.8
 
-# Local Multilingual Embeddings
-sentence-transformers>=2.2.2
-
 # Environment Variables
 python-dotenv>=1.0.0
 
