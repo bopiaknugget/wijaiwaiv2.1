@@ -3,6 +3,9 @@ Database Module for Research Workbench
 Handles storage and retrieval of research notes, document metadata,
 and parent chunks for Parent-Child Chunking (Advanced RAG).
 Uses context managers for all connections to prevent locks and leaks.
+
+User isolation: documents, notes, and web_pages are all scoped to user_id.
+Migration: ALTER TABLE adds user_id columns if they don't exist on startup.
 """
 
 import sqlite3
@@ -36,6 +39,7 @@ def initialize_database():
     """
     Create tables if they don't exist. Safe to call on every startup.
     Does NOT drop existing tables — data is fully persistent.
+    Also runs migrations to add user_id columns if missing.
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -75,7 +79,7 @@ def initialize_database():
             )
         ''')
 
-        # ตาราง web_pages สำหรับเก็บข้อมูลเว็บที่ scrape มา
+        # Web pages table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS web_pages (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,39 +105,64 @@ def initialize_database():
 
         conn.commit()
 
+        # ── Migrations: add user_id columns if not present ─────────────────
+        _add_column_if_missing(cursor, "documents",      "user_id", "TEXT")
+        _add_column_if_missing(cursor, "research_notes", "user_id", "TEXT")
+        _add_column_if_missing(cursor, "web_pages",      "user_id", "TEXT")
+        conn.commit()
+
+
+def _add_column_if_missing(cursor, table: str, column: str, col_type: str):
+    """Add a column to a table only if it doesn't already exist."""
+    cursor.execute(f"PRAGMA table_info({table})")
+    existing = {row[1] for row in cursor.fetchall()}
+    if column not in existing:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+
 
 # ── Research Notes ────────────────────────────────────────────────────────────
 
-def save_note(title: str, content: str) -> int:
+def save_note(title: str, content: str, user_id: str = None) -> int:
     """Save a research note. Returns the new note ID."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            'INSERT INTO research_notes (title, content) VALUES (?, ?)',
-            (title, content)
+            'INSERT INTO research_notes (title, content, user_id) VALUES (?, ?, ?)',
+            (title, content, user_id)
         )
         conn.commit()
         return cursor.lastrowid
 
 
-def load_all_notes() -> list:
-    """Load all research notes ordered newest-first."""
+def load_all_notes(user_id: str = None) -> list:
+    """Load research notes for a specific user ordered newest-first."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            'SELECT id, title, content, timestamp FROM research_notes ORDER BY timestamp DESC'
-        )
+        if user_id is not None:
+            cursor.execute(
+                'SELECT id, title, content, timestamp FROM research_notes '
+                'WHERE user_id = ? ORDER BY timestamp DESC',
+                (user_id,)
+            )
+        else:
+            cursor.execute(
+                'SELECT id, title, content, timestamp FROM research_notes ORDER BY timestamp DESC'
+            )
         return [
             {'id': row[0], 'title': row[1], 'content': row[2], 'timestamp': row[3]}
             for row in cursor.fetchall()
         ]
 
 
-def delete_note_by_id(note_id: int) -> bool:
-    """Delete a research note by ID. Returns True if a row was deleted."""
+def delete_note_by_id(note_id: int, user_id: str = None) -> bool:
+    """Delete a research note by ID. If user_id provided, scopes to that user."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM research_notes WHERE id = ?', (note_id,))
+        if user_id is not None:
+            cursor.execute('DELETE FROM research_notes WHERE id = ? AND user_id = ?',
+                           (note_id, user_id))
+        else:
+            cursor.execute('DELETE FROM research_notes WHERE id = ?', (note_id,))
         conn.commit()
         return cursor.rowcount > 0
 
@@ -141,26 +170,35 @@ def delete_note_by_id(note_id: int) -> bool:
 # ── Document Metadata ─────────────────────────────────────────────────────────
 
 def save_document_metadata(filename: str, file_type: str,
-                            chunk_count: int, db_path: str) -> int:
+                            chunk_count: int, db_path: str,
+                            user_id: str = None) -> int:
     """Save uploaded document metadata. Returns the new document ID."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            'INSERT INTO documents (filename, file_type, chunk_count, db_path) VALUES (?, ?, ?, ?)',
-            (filename, file_type, chunk_count, db_path)
+            'INSERT INTO documents (filename, file_type, chunk_count, db_path, user_id) '
+            'VALUES (?, ?, ?, ?, ?)',
+            (filename, file_type, chunk_count, db_path, user_id)
         )
         conn.commit()
         return cursor.lastrowid
 
 
-def load_all_documents() -> list:
-    """Load all document metadata ordered newest-first."""
+def load_all_documents(user_id: str = None) -> list:
+    """Load document metadata for a specific user ordered newest-first."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            'SELECT id, filename, file_type, chunk_count, db_path, timestamp '
-            'FROM documents ORDER BY timestamp DESC'
-        )
+        if user_id is not None:
+            cursor.execute(
+                'SELECT id, filename, file_type, chunk_count, db_path, timestamp '
+                'FROM documents WHERE user_id = ? ORDER BY timestamp DESC',
+                (user_id,)
+            )
+        else:
+            cursor.execute(
+                'SELECT id, filename, file_type, chunk_count, db_path, timestamp '
+                'FROM documents ORDER BY timestamp DESC'
+            )
         return [
             {
                 'id': row[0], 'filename': row[1], 'file_type': row[2],
@@ -170,11 +208,15 @@ def load_all_documents() -> list:
         ]
 
 
-def delete_document_by_id(doc_id: int) -> bool:
-    """Delete a document metadata record by ID. Returns True if a row was deleted."""
+def delete_document_by_id(doc_id: int, user_id: str = None) -> bool:
+    """Delete a document metadata record by ID. If user_id provided, scopes to that user."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM documents WHERE id = ?', (doc_id,))
+        if user_id is not None:
+            cursor.execute('DELETE FROM documents WHERE id = ? AND user_id = ?',
+                           (doc_id, user_id))
+        else:
+            cursor.execute('DELETE FROM documents WHERE id = ?', (doc_id,))
         conn.commit()
         return cursor.rowcount > 0
 
@@ -262,26 +304,35 @@ def delete_parent_chunks_by_source(source_file: str) -> int:
 
 # ── Web Pages ──────────────────────────────────────────────────────────────────
 
-def save_web_page(url: str, title: str, summary: str, chunk_count: int = 0) -> int:
-    """บันทึกข้อมูลเว็บเพจ Returns new web_page ID."""
+def save_web_page(url: str, title: str, summary: str, chunk_count: int = 0,
+                  user_id: str = None) -> int:
+    """Save web page metadata. Returns new web_page ID."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            'INSERT INTO web_pages (url, title, summary, chunk_count) VALUES (?, ?, ?, ?)',
-            (url, title, summary, chunk_count)
+            'INSERT INTO web_pages (url, title, summary, chunk_count, user_id) '
+            'VALUES (?, ?, ?, ?, ?)',
+            (url, title, summary, chunk_count, user_id)
         )
         conn.commit()
         return cursor.lastrowid
 
 
-def load_all_web_pages() -> list:
-    """โหลดรายการเว็บเพจทั้งหมด เรียงจากใหม่ไปเก่า"""
+def load_all_web_pages(user_id: str = None) -> list:
+    """Load web pages for a specific user, ordered newest-first."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            'SELECT id, url, title, summary, chunk_count, timestamp '
-            'FROM web_pages ORDER BY timestamp DESC'
-        )
+        if user_id is not None:
+            cursor.execute(
+                'SELECT id, url, title, summary, chunk_count, timestamp '
+                'FROM web_pages WHERE user_id = ? ORDER BY timestamp DESC',
+                (user_id,)
+            )
+        else:
+            cursor.execute(
+                'SELECT id, url, title, summary, chunk_count, timestamp '
+                'FROM web_pages ORDER BY timestamp DESC'
+            )
         return [
             {
                 'id': row[0], 'url': row[1], 'title': row[2],
@@ -291,17 +342,21 @@ def load_all_web_pages() -> list:
         ]
 
 
-def delete_web_page_by_id(page_id: int) -> bool:
-    """ลบเว็บเพจตาม ID Returns True ถ้าลบสำเร็จ"""
+def delete_web_page_by_id(page_id: int, user_id: str = None) -> bool:
+    """Delete a web page by ID. If user_id provided, scopes to that user."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM web_pages WHERE id = ?', (page_id,))
+        if user_id is not None:
+            cursor.execute('DELETE FROM web_pages WHERE id = ? AND user_id = ?',
+                           (page_id, user_id))
+        else:
+            cursor.execute('DELETE FROM web_pages WHERE id = ?', (page_id,))
         conn.commit()
         return cursor.rowcount > 0
 
 
 def update_web_page_title(page_id: int, new_title: str) -> bool:
-    """อัปเดตชื่อ Title ของเว็บเพจ Returns True ถ้าอัปเดตสำเร็จ"""
+    """Update the title of a web page."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -314,7 +369,7 @@ def update_web_page_title(page_id: int, new_title: str) -> bool:
 
 def update_web_page(page_id: int, new_title: str, new_summary: str,
                     chunk_count: int = None) -> bool:
-    """อัปเดต Title, Summary (และ chunk_count ถ้าระบุ) ของเว็บเพจ"""
+    """Update title, summary (and optionally chunk_count) of a web page."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         if chunk_count is not None:
@@ -332,7 +387,7 @@ def update_web_page(page_id: int, new_title: str, new_summary: str,
 
 
 def get_web_page_by_id(page_id: int) -> dict | None:
-    """ดึงข้อมูลเว็บเพจตาม ID"""
+    """Retrieve a web page by ID."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -401,5 +456,87 @@ def get_user(user_id: str) -> dict | None:
         return None
 
 
+# ── Editor Documents (per-user file storage in SQLite) ───────────────────────
+
+def initialize_editor_documents_table():
+    """Create the editor_documents table for per-user editor file persistence."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS editor_documents (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     TEXT NOT NULL,
+                name        TEXT NOT NULL,
+                title       TEXT NOT NULL,
+                content     TEXT NOT NULL,
+                timestamp   DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, name)
+            )
+        ''')
+        conn.commit()
+
+
+def save_editor_document(user_id: str, name: str, title: str, content: str) -> int:
+    """
+    Save or overwrite an editor document for a user.
+    Uses INSERT OR REPLACE so Save (overwrite) and Save As (new name) both work.
+    Returns the document ID.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'INSERT OR REPLACE INTO editor_documents (user_id, name, title, content, timestamp) '
+            'VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)',
+            (user_id, name, title, content)
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+
+def load_editor_document(user_id: str, name: str) -> dict | None:
+    """Load a specific editor document by user_id and name. Returns dict or None."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT id, name, title, content, timestamp FROM editor_documents '
+            'WHERE user_id = ? AND name = ?',
+            (user_id, name)
+        )
+        row = cursor.fetchone()
+        if row:
+            return {'id': row[0], 'name': row[1], 'title': row[2],
+                    'content': row[3], 'timestamp': row[4]}
+        return None
+
+
+def list_editor_documents(user_id: str) -> list:
+    """List all editor documents for a user, ordered newest-first."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT id, name, title, content, timestamp FROM editor_documents '
+            'WHERE user_id = ? ORDER BY timestamp DESC',
+            (user_id,)
+        )
+        return [
+            {'id': row[0], 'name': row[1], 'title': row[2],
+             'content': row[3], 'timestamp': row[4]}
+            for row in cursor.fetchall()
+        ]
+
+
+def delete_editor_document(user_id: str, name: str) -> bool:
+    """Delete an editor document by user_id and name. Returns True if deleted."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'DELETE FROM editor_documents WHERE user_id = ? AND name = ?',
+            (user_id, name)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
 # Initialize database on import (idempotent — CREATE TABLE IF NOT EXISTS)
 initialize_database()
+initialize_editor_documents_table()

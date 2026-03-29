@@ -308,8 +308,10 @@ def upsert_documents(chunks: list, user_id: str,
         if 'source_type' not in meta:
             meta['source_type'] = 'document'
 
-        # Generate unique vector ID
-        vec_id = f"{meta.get('doc_name', 'doc')}_{uuid.uuid4().hex[:12]}"
+        # Generate unique vector ID — must be ASCII-only for Pinecone
+        raw_name = meta.get('doc_name', 'doc')
+        safe_name = hashlib.sha256(raw_name.encode()).hexdigest()[:16]
+        vec_id = f"{safe_name}_{uuid.uuid4().hex[:12]}"
 
         # Clean metadata: Pinecone only supports str, int, float, bool, list[str]
         clean_meta = {}

@@ -55,29 +55,41 @@ _THINK_PATTERN = re.compile(r'<think>(.*?)</think>', re.DOTALL)
 WORK_DIR = os.path.join(os.path.dirname(__file__), "user_data")
 
 
-# ── File helpers ───────────────────────────────────────────────────────────────
+# ── Editor Document helpers (SQLite-backed, per-user) ─────────────────────────
+
+def save_work_to_db(user_id: str, name: str, title: str, content: str) -> str:
+    """Save editor document to SQLite under user_id. Returns the doc name (used as key)."""
+    from datetime import datetime
+    safe_name = re.sub(r'[\\/*?:"<>|]', "_", name.strip())[:60]
+    if not safe_name:
+        safe_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+    database.save_editor_document(user_id, safe_name, title, content)
+    return safe_name
+
+
+def save_work_to_db_new(user_id: str, name: str, title: str, content: str) -> str:
+    """Save as a new editor document — appends timestamp to name to avoid collision."""
+    from datetime import datetime
+    safe_name = re.sub(r'[\\/*?:"<>|]', "_", name.strip())[:60]
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    unique_name = f"{safe_name}_{timestamp}"
+    database.save_editor_document(user_id, unique_name, title, content)
+    return unique_name
+
+
+def list_work_docs(user_id: str) -> list:
+    """List all editor documents for a user. Returns list of dicts."""
+    return database.list_editor_documents(user_id)
+
+
+# ── Legacy filesystem helpers (kept for Import from disk only) ─────────────────
 
 def _ensure_work_dir():
     os.makedirs(WORK_DIR, exist_ok=True)
 
 
-def save_work_to_file(title: str, content: str) -> str:
-    return save_work_to_file_with_name(title, title, content)
-
-
-def save_work_to_file_with_name(name: str, title: str, content: str) -> str:
-    _ensure_work_dir()
-    from datetime import datetime
-    safe_name = re.sub(r'[\\/*?:"<>|]', "_", name.strip())[:60]
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{safe_name}_{timestamp}.txt"
-    filepath = os.path.join(WORK_DIR, filename)
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(f"TITLE: {title}\n---\n{content}")
-    return filepath
-
-
 def load_work_from_file(filepath: str):
+    """Load a .txt file from disk (used by Import only)."""
     with open(filepath, "r", encoding="utf-8") as f:
         raw = f.read()
     if raw.startswith("TITLE: ") and "\n---\n" in raw:
@@ -87,18 +99,6 @@ def load_work_from_file(filepath: str):
         title = os.path.splitext(os.path.basename(filepath))[0]
         content = raw
     return title, content
-
-
-def overwrite_work_file(filepath: str, title: str, content: str):
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(f"TITLE: {title}\n---\n{content}")
-
-
-def list_work_files():
-    _ensure_work_dir()
-    files = [f for f in os.listdir(WORK_DIR) if f.endswith(".txt")]
-    files.sort(reverse=True)
-    return [(f, os.path.join(WORK_DIR, f)) for f in files]
 
 
 # ── Think-tag helpers ──────────────────────────────────────────────────────────
@@ -414,7 +414,7 @@ def main():
     defaults = {
         "processed_docs": [
             {"name": d["filename"], "chunks": d["chunk_count"], "doc_id": d["id"]}
-            for d in database.load_all_documents()
+            for d in database.load_all_documents(user_id)
         ],
         "messages": [],
         "total_tokens": 0,
@@ -424,10 +424,12 @@ def main():
         "work_title_val": "",
         "work_content_val": "",
         "work_current_file": None,
+        "_editor_restored": False,
         "work_load_select": None,
         "work_save_dialog": None,
         "work_save_dialog_name": "",
         "work_import_open": False,
+        "work_export_open": False,
         "_app_initialized": False,
         "_research_mode": False,
         "ai_edit_undo_stack": [],
@@ -438,6 +440,16 @@ def main():
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+    # ── Auto-restore last editor document on login ────────────────────────────
+    if not st.session_state.get("_editor_restored"):
+        st.session_state._editor_restored = True
+        _saved_docs = database.list_editor_documents(user_id)
+        if _saved_docs:
+            _last = _saved_docs[0]  # newest-first order
+            st.session_state.work_title_val = _last["title"] or ""
+            st.session_state.work_content_val = _last["content"] or ""
+            st.session_state.work_current_file = _last["name"]
 
     # ── Banner image (used by splash and top banner) ──────────────────────────
     import base64, pathlib
@@ -822,12 +834,13 @@ def main():
                                     documents, uploaded_file.name
                                 )
 
-                                # Save document metadata to SQLite
+                                # Save document metadata to SQLite (scoped to user)
                                 doc_id = database.save_document_metadata(
                                     filename=uploaded_file.name,
                                     file_type=ext.lstrip('.'),
                                     chunk_count=len(child_chunks),
                                     db_path="pinecone",
+                                    user_id=user_id,
                                 )
                                 # Inject doc_id into child chunk metadata
                                 for chunk in child_chunks:
@@ -859,7 +872,10 @@ def main():
                                     embedding_model,
                                 )
 
-                                st.session_state.processed_docs.extend(new_doc_entries)
+                                existing_names = {d["name"] for d in st.session_state.processed_docs}
+                                st.session_state.processed_docs.extend(
+                                    e for e in new_doc_entries if e["name"] not in existing_names
+                                )
                                 st.session_state.messages = []
                                 st.session_state.total_tokens = 0
                                 st.session_state.total_cost_thb = 0.0
@@ -874,13 +890,13 @@ def main():
             if st.session_state.processed_docs:
                 st.divider()
                 st.caption(f"{len(st.session_state.processed_docs)} document(s) loaded")
-                for doc_entry in list(st.session_state.processed_docs):
+                for _di, doc_entry in enumerate(list(st.session_state.processed_docs)):
                     col_info, col_del = st.columns([5, 1])
                     with col_info:
                         st.markdown(f"📄 **{doc_entry['name']}**")
                         st.caption(f"{doc_entry['chunks']} chunks")
                     with col_del:
-                        if st.button("🗑️", key=f"del_doc_{doc_entry['name']}",
+                        if st.button("🗑️", key=f"del_doc_{_di}",
                                      help="Delete this document"):
                             # Remove chunks from Pinecone
                             try:
@@ -889,9 +905,9 @@ def main():
                                 st.error(f"VectorDB delete error: {e}")
                             # Remove parent chunks from SQLite
                             database.delete_parent_chunks_by_source(doc_entry["name"])
-                            # Remove document metadata from SQLite
+                            # Remove document metadata from SQLite (scoped to user)
                             if doc_entry.get("doc_id"):
-                                database.delete_document_by_id(doc_entry["doc_id"])
+                                database.delete_document_by_id(doc_entry["doc_id"], user_id)
                             # Remove from tracking list immediately
                             st.session_state.processed_docs = [
                                 d for d in st.session_state.processed_docs
@@ -923,7 +939,7 @@ def main():
                 if note_title_input.strip() and note_content_input.strip():
                     with st.spinner("Saving note..."):
                         note_id = database.save_note(
-                            note_title_input, note_content_input
+                            note_title_input, note_content_input, user_id
                         )
                         # Embed into Pinecone with source_type='note'
                         ingest_note(
@@ -940,7 +956,7 @@ def main():
             st.divider()
 
             # ── Saved notes list with Delete buttons ────
-            notes = database.load_all_notes()
+            notes = database.load_all_notes(user_id)
             if notes:
                 st.caption(f"{len(notes)} note(s) saved")
                 for note in notes:
@@ -951,8 +967,8 @@ def main():
                     with col_del:
                         if st.button("🗑️", key=f"del_note_{note['id']}",
                                      help="Delete this note"):
-                            # 1. Remove from SQLite
-                            database.delete_note_by_id(note['id'])
+                            # 1. Remove from SQLite (scoped to user)
+                            database.delete_note_by_id(note['id'], user_id)
                             # 2. Remove from Pinecone
                             try:
                                 delete_by_metadata("note_id", note['id'], user_id)
@@ -1029,6 +1045,7 @@ def main():
                                     title=auto_title,
                                     summary=summary_text,
                                     chunk_count=0,
+                                    user_id=user_id,
                                 )
 
                                 child_chunks, parent_records = prepare_web_chunks(
@@ -1059,7 +1076,7 @@ def main():
                                 st.error(f"เกิดข้อผิดพลาด: {str(e)}")
 
             # ── รายการเว็บที่บันทึกไว้ ──
-            web_pages = database.load_all_web_pages()
+            web_pages = database.load_all_web_pages(user_id)
             if web_pages:
                 st.divider()
                 st.caption(f"เว็บที่บันทึกไว้ ({len(web_pages)})")
@@ -1082,7 +1099,7 @@ def main():
                             except Exception:
                                 pass
                             database.delete_parent_chunks_by_source(wp['url'])
-                            database.delete_web_page_by_id(wp['id'])
+                            database.delete_web_page_by_id(wp['id'], user_id)
                             st.rerun()
 
             # ── Pop-up แก้ไขชื่อ ──
@@ -1248,121 +1265,24 @@ def main():
                         except Exception as e:
                             st.error(f"❌ เกิดข้อผิดพลาด: {str(e)}")
 
-        current_file = st.session_state.get("work_current_file")
-        if current_file:
-            st.caption(f"📄 `{os.path.basename(current_file)}`")
-
-        # ── Row 1: File actions ────────────────────────────────────────────
-        c_save, c_saveas, c_load, c_export, c_import = st.columns(5)
-        with c_save:
-            save_clicked = st.button("💾 Save", type="primary",
-                                     key="save_work_btn", use_container_width=True)
-        with c_saveas:
-            save_as_clicked = st.button("📑 Save As",
-                                        key="save_as_work_btn", use_container_width=True)
-        with c_load:
-            load_work_clicked = st.button("📂 Load",
-                                          key="load_work_btn", use_container_width=True)
-        with c_export:
-            export_data = (
-                f"TITLE: {work_title}\n---\n{work_content}"
-                if (work_title.strip() and work_content.strip()) else ""
-            )
-            export_fname = (
-                re.sub(r'[\\/*?:"<>|]', "_", work_title.strip())[:60] or "work"
-            ) + ".txt"
-            st.download_button(
-                "📤 Export",
-                data=export_data.encode("utf-8"),
-                file_name=export_fname,
-                mime="text/plain",
-                key="export_work_btn",
-                use_container_width=True,
-                disabled=not export_data,
-            )
-        with c_import:
-            import_clicked = st.button("📥 Import",
-                                       key="import_work_btn", use_container_width=True)
-
-        # ── Row 2: Edit actions ───────────────────────────────────────────
-        c_undo, c_redo, c_clear = st.columns(3)
-        with c_undo:
-            undo_clicked = st.button(
-                "↩️ Undo",
-                key="ai_undo_btn",
-                use_container_width=True,
-                disabled=not st.session_state.ai_edit_undo_stack,
-                help="Undo the last AI edit",
-            )
-        with c_redo:
-            redo_clicked = st.button(
-                "↪️ Redo",
-                key="ai_redo_btn",
-                use_container_width=True,
-                disabled=not st.session_state.ai_edit_redo_stack,
-                help="Redo the last undone AI edit",
-            )
-        with c_clear:
-            clear_editor_clicked = st.button("🗑️ Clear",
-                                             key="clear_editor_btn", use_container_width=True)
-
-        # ── Button logic ───────────────────────────────────────────────────────
-        if save_clicked:
-            if not work_title.strip() or not work_content.strip():
-                st.warning("⚠️ Please enter both a title and content.")
-            elif current_file and os.path.exists(current_file):
-                overwrite_work_file(current_file, work_title, work_content)
-                st.success(f"✅ Saved → `{os.path.basename(current_file)}`")
+        # ── Load panel ─────────────────────────────────────────────────────────
+        if st.session_state.get("work_load_select"):
+            work_docs = list_work_docs(user_id)
+            if work_docs:
+                display_names = [d["name"] for d in work_docs]
+                selected_name = st.selectbox("Select a document to load",
+                                             options=display_names,
+                                             key="work_file_selectbox")
+                if st.button("✅ Load into editor", key="confirm_load_btn"):
+                    doc = next((d for d in work_docs if d["name"] == selected_name), None)
+                    if doc:
+                        st.session_state["_pending_work_title"] = doc["title"]
+                        st.session_state["_pending_work_content"] = doc["content"]
+                        st.session_state.work_current_file = doc["name"]
+                        st.session_state.work_load_select = False
+                        st.rerun()
             else:
-                st.session_state.work_save_dialog = "save"
-                st.session_state.work_save_dialog_name = work_title
-                st.session_state.work_load_select = False
-                st.session_state.work_import_open = False
-                st.rerun()
-
-        if save_as_clicked:
-            if not work_title.strip() or not work_content.strip():
-                st.warning("⚠️ Please enter both a title and content.")
-            else:
-                st.session_state.work_save_dialog = "save_as"
-                st.session_state.work_save_dialog_name = work_title
-                st.session_state.work_load_select = False
-                st.session_state.work_import_open = False
-                st.rerun()
-
-        if load_work_clicked:
-            st.session_state.work_load_select = True
-            st.session_state.work_save_dialog = None
-            st.session_state.work_import_open = False
-
-        if import_clicked:
-            st.session_state.work_import_open = True
-            st.session_state.work_load_select = False
-            st.session_state.work_save_dialog = None
-
-        if clear_editor_clicked:
-            st.session_state["_pending_work_title"] = ""
-            st.session_state["_pending_work_content"] = ""
-            st.session_state.work_title_val = ""
-            st.session_state.work_content_val = ""
-            st.session_state.work_current_file = None
-            st.session_state.ai_edit_undo_stack = []
-            st.session_state.ai_edit_redo_stack = []
-            st.rerun()
-
-        if undo_clicked and st.session_state.ai_edit_undo_stack:
-            st.session_state.ai_edit_redo_stack.append(work_content)
-            restored = st.session_state.ai_edit_undo_stack.pop()
-            st.session_state["_pending_work_content"] = restored
-            st.session_state.work_content_val = restored
-            st.rerun()
-
-        if redo_clicked and st.session_state.ai_edit_redo_stack:
-            st.session_state.ai_edit_undo_stack.append(work_content)
-            restored = st.session_state.ai_edit_redo_stack.pop()
-            st.session_state["_pending_work_content"] = restored
-            st.session_state.work_content_val = restored
-            st.rerun()
+                st.info("No saved work documents found.")
 
         # ── Save dialog ────────────────────────────────────────────────────────
         if st.session_state.get("work_save_dialog"):
@@ -1384,37 +1304,23 @@ def main():
                                         use_container_width=True)
             if confirm_save:
                 if dialog_name.strip():
-                    filepath = save_work_to_file_with_name(
-                        dialog_name, work_title, work_content
-                    )
-                    st.session_state.work_current_file = filepath
+                    if st.session_state.get("work_save_dialog") == "save_as":
+                        doc_name = save_work_to_db_new(
+                            user_id, dialog_name, work_title, work_content
+                        )
+                    else:
+                        doc_name = save_work_to_db(
+                            user_id, dialog_name, work_title, work_content
+                        )
+                    st.session_state.work_current_file = doc_name
                     st.session_state.work_save_dialog = None
-                    st.success(f"✅ Saved → `{os.path.basename(filepath)}`")
+                    st.success(f"✅ Saved → `{doc_name}`")
                     st.rerun()
                 else:
                     st.warning("⚠️ กรุณาระบุชื่อไฟล์")
             if cancel_save:
                 st.session_state.work_save_dialog = None
                 st.rerun()
-
-        # ── Load panel ─────────────────────────────────────────────────────────
-        if st.session_state.get("work_load_select"):
-            work_files = list_work_files()
-            if work_files:
-                display_names = [name for name, _ in work_files]
-                selected = st.selectbox("Select a file to load",
-                                        options=display_names,
-                                        key="work_file_selectbox")
-                if st.button("✅ Load into editor", key="confirm_load_btn"):
-                    selected_path = dict(work_files)[selected]
-                    loaded_title, loaded_content = load_work_from_file(selected_path)
-                    st.session_state["_pending_work_title"] = loaded_title
-                    st.session_state["_pending_work_content"] = loaded_content
-                    st.session_state.work_current_file = selected_path
-                    st.session_state.work_load_select = False
-                    st.rerun()
-            else:
-                st.info("No saved work files found.")
 
         # ── Import panel ───────────────────────────────────────────────────────
         if st.session_state.get("work_import_open"):
@@ -1449,6 +1355,153 @@ def main():
             if st.button("❌ ยกเลิก import", key="cancel_import_btn"):
                 st.session_state.work_import_open = False
                 st.rerun()
+
+        # ── Export panel ───────────────────────────────────────────────────────
+        if st.session_state.get("work_export_open"):
+            export_data = (
+                f"TITLE: {work_title}\n---\n{work_content}"
+                if (work_title.strip() and work_content.strip()) else ""
+            )
+            default_fname = (
+                re.sub(r'[\\/*?:"<>|]', "_", work_title.strip())[:60] or "work"
+            ) + ".txt"
+            export_fname_input = st.text_input(
+                "📁 ชื่อไฟล์ที่ต้องการบันทึก",
+                value=default_fname,
+                key="export_fname_input"
+            )
+            col_dl, col_cancel_ex = st.columns([1, 1])
+            with col_dl:
+                st.download_button(
+                    "📥 ดาวน์โหลด",
+                    data=export_data.encode("utf-8") if export_data else b"",
+                    file_name=export_fname_input or default_fname,
+                    mime="text/plain",
+                    key="export_download_btn",
+                    use_container_width=True,
+                    disabled=not export_data,
+                )
+            with col_cancel_ex:
+                if st.button("❌ ยกเลิก", key="cancel_export_btn", use_container_width=True):
+                    st.session_state.work_export_open = False
+                    st.rerun()
+
+        current_file = st.session_state.get("work_current_file")
+        if current_file:
+            st.caption(f"📄 `{current_file}`")
+
+        # ── Row 1: File actions ────────────────────────────────────────────
+        c_save, c_saveas, c_load, c_export, c_import = st.columns(5)
+        with c_save:
+            save_clicked = st.button("💾 Save", type="primary",
+                                     key="save_work_btn", use_container_width=True)
+        with c_saveas:
+            save_as_clicked = st.button("📑 Save As",
+                                        key="save_as_work_btn", use_container_width=True)
+        with c_load:
+            load_work_clicked = st.button("📂 Load",
+                                          key="load_work_btn", use_container_width=True)
+        with c_export:
+            export_clicked = st.button("📤 Export",
+                                       key="export_work_btn",
+                                       use_container_width=True)
+        with c_import:
+            import_clicked = st.button("📥 Import",
+                                       key="import_work_btn", use_container_width=True)
+
+        # ── Row 2: Edit actions ───────────────────────────────────────────
+        c_undo, c_redo, c_clear = st.columns(3)
+        with c_undo:
+            undo_clicked = st.button(
+                "↩️ Undo",
+                key="ai_undo_btn",
+                use_container_width=True,
+                disabled=not st.session_state.ai_edit_undo_stack,
+                help="Undo the last AI edit",
+            )
+        with c_redo:
+            redo_clicked = st.button(
+                "↪️ Redo",
+                key="ai_redo_btn",
+                use_container_width=True,
+                disabled=not st.session_state.ai_edit_redo_stack,
+                help="Redo the last undone AI edit",
+            )
+        with c_clear:
+            clear_editor_clicked = st.button("🗑️ Clear",
+                                             key="clear_editor_btn", use_container_width=True)
+
+        # ── Button logic ───────────────────────────────────────────────────────
+        if save_clicked:
+            if not work_title.strip() or not work_content.strip():
+                st.warning("⚠️ Please enter both a title and content.")
+            elif current_file:
+                # Overwrite existing doc by name in SQLite
+                save_work_to_db(user_id, current_file, work_title, work_content)
+                st.success(f"✅ Saved → `{current_file}`")
+            else:
+                st.session_state.work_save_dialog = "save"
+                st.session_state.work_save_dialog_name = work_title
+                st.session_state.work_load_select = False
+                st.session_state.work_import_open = False
+                st.session_state.work_export_open = False
+                st.rerun()
+
+        if save_as_clicked:
+            if not work_title.strip() or not work_content.strip():
+                st.warning("⚠️ Please enter both a title and content.")
+            else:
+                st.session_state.work_save_dialog = "save_as"
+                st.session_state.work_save_dialog_name = work_title
+                st.session_state.work_load_select = False
+                st.session_state.work_import_open = False
+                st.session_state.work_export_open = False
+                st.rerun()
+
+        if load_work_clicked:
+            st.session_state.work_load_select = True
+            st.session_state.work_save_dialog = None
+            st.session_state.work_import_open = False
+            st.session_state.work_export_open = False
+            st.rerun()
+
+        if import_clicked:
+            st.session_state.work_import_open = True
+            st.session_state.work_load_select = False
+            st.session_state.work_save_dialog = None
+            st.session_state.work_export_open = False
+            st.rerun()
+
+        if export_clicked:
+            st.session_state.work_export_open = True
+            st.session_state.work_load_select = False
+            st.session_state.work_save_dialog = None
+            st.session_state.work_import_open = False
+            st.rerun()
+
+        if clear_editor_clicked:
+            st.session_state["_pending_work_title"] = ""
+            st.session_state["_pending_work_content"] = ""
+            st.session_state.work_title_val = ""
+            st.session_state.work_content_val = ""
+            st.session_state.work_current_file = None
+            st.session_state.ai_edit_undo_stack = []
+            st.session_state.ai_edit_redo_stack = []
+            st.rerun()
+
+        if undo_clicked and st.session_state.ai_edit_undo_stack:
+            st.session_state.ai_edit_redo_stack.append(work_content)
+            restored = st.session_state.ai_edit_undo_stack.pop()
+            st.session_state["_pending_work_content"] = restored
+            st.session_state.work_content_val = restored
+            st.rerun()
+
+        if redo_clicked and st.session_state.ai_edit_redo_stack:
+            st.session_state.ai_edit_undo_stack.append(work_content)
+            restored = st.session_state.ai_edit_redo_stack.pop()
+            st.session_state["_pending_work_content"] = restored
+            st.session_state.work_content_val = restored
+            st.rerun()
 
         st.divider()
 
