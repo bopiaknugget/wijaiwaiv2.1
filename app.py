@@ -36,6 +36,7 @@ from generator import (
     generate_insertion,
     generate_section,
     is_small_talk,
+    _PARAMETRIC_WARNING,
 )
 from reviewer import review_research
 from web_scraper import scrape_url, summarize_content, generate_title, prepare_web_chunks

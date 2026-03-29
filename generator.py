@@ -421,8 +421,11 @@ def generate_section(topic, section_instruction, retrieved_docs=None,
         raise ValueError("OPENTHAI_API_KEY not found")
 
     context_text = ""
+    _MAX_DOC_CHARS = 1500
+    _MAX_CONTEXT_CHARS = 6000
     if retrieved_docs:
-        context_text = "\n\n".join(doc.page_content for doc in retrieved_docs)
+        parts = [doc.page_content[:_MAX_DOC_CHARS] for doc in retrieved_docs]
+        context_text = "\n\n".join(parts)[:_MAX_CONTEXT_CHARS]
 
     system_prompt = (
         "คุณเป็นนักเขียนวิชาการผู้เชี่ยวชาญ เขียนเนื้อหาทีละ section\n"
@@ -470,6 +473,8 @@ def generate_selection_edit(selected_text, instruction):
         "ห้ามใส่เครื่องหมายคำพูดครอบข้อความ\n"
         "แก้ไขโดยรักษาภาษาเดิมของข้อความ หากคำสั่งเป็นภาษาไทยให้ตอบเป็นภาษาไทย"
     )
+    _MAX_SELECTION_CHARS = 4000
+    selected_text = selected_text[:_MAX_SELECTION_CHARS]
     user_msg = (
         f"ข้อความที่เลือก:\n\"\"\"\n{selected_text}\n\"\"\"\n\n"
         f"คำสั่งแก้ไข: {instruction}"

@@ -75,6 +75,8 @@ def review_research(content: str, user_focus: str = "") -> tuple:
             "  2. OPENTHAI_API_KEY=your_key_here is set (no quotes, no spaces)"
         )
 
+    _MAX_REVIEW_CHARS = 8000
+    content = content[:_MAX_REVIEW_CHARS]
     user_parts = [f"=== งานวิจัยที่ต้อง Review ===\n{content}"]
     if user_focus and user_focus.strip():
         user_parts.append(
