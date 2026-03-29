@@ -24,8 +24,107 @@ _PARAMETRIC_WARNING = (
     "เนื่องจากไม่พบข้อมูลในเอกสารหรือโน้ตของคุณ"
 )
 
+# ── Sentence Completion Guard ─────────────────────────────────────────────────
+# Thai sentence endings: full stop, Thai characters followed by space/newline,
+# common Thai particles that end sentences (ครับ, ค่ะ, นะ, etc.)
+_THAI_SENTENCE_END = re.compile(
+    r'[\.\!\?]'                       # universal punctuation
+    r'|(?<=[ครับค่ะนะคะจ้ะจ๊ะด้วยเลย])\s'  # Thai particles followed by space
+    r'|(?<=[ครับค่ะนะคะจ้ะจ๊ะด้วยเลย])$'    # Thai particles at end of text
+    r'|\n\n'                          # paragraph break = safe boundary
+)
+
+
+def ensure_complete_sentence(text: str) -> str:
+    """
+    Trim text to the last complete sentence to prevent incomplete output.
+
+    Handles both Thai and English text. If the text already ends with a
+    sentence-ending character, it is returned unchanged. Otherwise it is
+    trimmed back to the last sentence boundary found.
+
+    Args:
+        text: The raw LLM output text
+
+    Returns:
+        str: Text trimmed to the last complete sentence
+    """
+    if not text or not text.strip():
+        return text
+
+    text = text.rstrip()
+
+    # Already ends cleanly
+    if text[-1] in '.!?:' or text.endswith('ครับ') or text.endswith('ค่ะ') or text.endswith('นะ') or text.endswith('คะ'):
+        return text
+
+    # Find the last sentence-ending position
+    # Strategy: search for the last occurrence of sentence-ending punctuation
+    last_good = -1
+
+    # Check for last period/exclamation/question that isn't inside a number
+    for match in re.finditer(r'[\.\!\?](?:\s|$)', text):
+        last_good = match.end()
+
+    # Check for last paragraph break
+    last_para = text.rfind('\n\n')
+    if last_para > last_good:
+        # Find end of the sentence after the paragraph break
+        last_good = last_para
+
+    # Check for Thai sentence-ending particles followed by space or end
+    for match in re.finditer(r'(?:ครับ|ค่ะ|นะ|คะ|จ้ะ|จ๊ะ|เลย|ด้วย)(?:\s|$)', text):
+        pos = match.end()
+        if pos > last_good:
+            last_good = pos
+
+    if last_good > len(text) * 0.5:
+        # Only trim if we keep at least 50% of the text
+        return text[:last_good].rstrip()
+
+    # If no good boundary found or it would cut too much, return as-is
+    return text
+
+
 API_URL = "http://thaillm.or.th/api/openthaigpt/v1/chat/completions"
 MODEL = "/model"
+
+# ── Edit Intent Detection (local, no API call) ───────────────────────────────
+# Thai edit verbs + document-reference nouns used for lightweight pre-check
+_EDIT_VERBS = re.compile(
+    r'แก้ไข|เพิ่ม(?:เนื้อหา|ข้อมูล|บท)|เขียน|ลบ|แทรก|ปรับ|เปลี่ยน|'
+    r'อัปเดต|แก้|เรียบเรียง|สรุป.*(?:ลง|ใส่|เขียน)|'
+    r'\bedit\b|\badd\b|\bwrite\b|\bdelete\b|\binsert\b|\bmodify\b|\bupdate\b|\breplace\b',
+    re.IGNORECASE,
+)
+_DOC_REFS = re.compile(
+    r'เอกสาร|editor|ตัวแก้ไข|workbench|เนื้อหา|บทความ|ในเอกสาร|'
+    r'บทนำ|บทที่|หัวข้อ|ย่อหน้า|document|content',
+    re.IGNORECASE,
+)
+
+
+def is_edit_intent(query: str) -> bool:
+    """
+    Lightweight local check (regex/keyword) to determine if the user likely
+    wants an edit action. Used by app.py to decide between streaming (chat)
+    and non-streaming (edit) paths — no API call involved.
+
+    Returns True if the query contains edit-intent verbs AND document references,
+    OR if it contains strong edit-only patterns like "เขียนบทนำ", "เพิ่มเนื้อหาเกี่ยวกับ".
+    """
+    q = query.strip()
+    # Strong patterns that are unambiguously edit commands
+    if re.search(r'เขียน(?:บท|เนื้อหา|หัวข้อ)', q):
+        return True
+    if re.search(r'เพิ่มเนื้อหา|เพิ่มข้อมูล|แก้ไข(?:เนื้อหา|เอกสาร|หัวข้อ|ย่อหน้า)', q):
+        return True
+    if re.search(r'\b(?:edit|write|add|insert|modify)\s+(?:the\s+)?(?:document|content|section|editor)\b', q, re.IGNORECASE):
+        return True
+    # Weaker: verb + doc reference together
+    if _EDIT_VERBS.search(q) and _DOC_REFS.search(q):
+        return True
+    return False
 
 # ── Query Routing: small-talk patterns ────────────────────────────────────────
 # Queries matching these patterns are answered directly from the LLM without
@@ -207,7 +306,7 @@ def _extract_json(text: str):
 
 
 def generate_answer(query, retrieved_docs, chat_history=None, editor_content=None,
-                    research_mode=False):
+                    research_mode=False, **kwargs):
     """
     Generate an AI-powered answer or editor action using OpenThaiGPT API.
 
@@ -279,7 +378,7 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
             "{\"action\":\"research\",\"response\":\"สรุป 1-2 ประโยค\",\"editor_content\":\"เนื้อหาฉบับเต็ม ≥1,000 คำ\"}"
         )
     else:
-        # ── Answer mode: pure Q&A — plain text, no edit action ───────────────
+        # ── Chat mode: Q&A with editor awareness + edit intent support ───────
         if has_context:
             knowledge_instruction = (
                 "ใช้บริบทจากเอกสารด้านล่างเป็นหลักในการตอบ "
@@ -292,23 +391,48 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
                 "ไม่มีเอกสารถูกโหลดไว้ — ตอบจากความรู้ทั่วไปของ AI ได้เลย"
             )
 
+        # Determine if this call expects edit capability (set by app.py)
+        _edit_capable = kwargs.get("edit_capable", False)
+
+        if _edit_capable:
+            edit_instruction = (
+                "\n\nการจำแนกเจตนา:\n"
+                "- หากผู้ใช้ขอแก้ไข/เพิ่ม/เขียน/ลบ/แทรก/ปรับเนื้อหาในเอกสาร → "
+                "ตอบ JSON: {\"action\":\"edit\",\"response\":\"สรุปสิ่งที่ทำ\",\"editor_content\":\"เนื้อหาใหม่ทั้งหมดของเอกสาร\"}\n"
+                "- editor_content ต้องเป็นเนื้อหาฉบับเต็มของเอกสาร (รวมส่วนที่ไม่ได้แก้ด้วย)\n"
+                "- หากผู้ใช้ถามคำถามหรือสนทนา → ตอบเป็น plain text ธรรมดา ไม่ต้องมี JSON"
+            )
+        else:
+            edit_instruction = ""
+
+        editor_awareness = ""
+        if editor_content and editor_content.strip():
+            editor_awareness = (
+                "\nคุณรับรู้เนื้อหาในตัวแก้ไขของผู้ใช้ สามารถตอบคำถามเกี่ยวกับเนื้อหานั้นได้"
+            )
+
         system_prompt = (
             "คุณเป็นผู้ช่วยวิจัย ทำหน้าที่ตอบคำถามอย่างตรงประเด็นและถูกต้อง\n"
             f"{knowledge_instruction}\n"
-            f"{language_instruction}\n\n"
+            f"{language_instruction}"
+            f"{editor_awareness}\n\n"
             "แนวทางการตอบ:\n"
             "- ตอบตรงคำถาม ชัดเจน ครบถ้วน\n"
             "- อ้างอิงเนื้อหาจากเอกสารเมื่อเกี่ยวข้อง\n"
-            "- ตอบเป็น plain text ธรรมดา ไม่ต้องมี JSON\n"
-            "- ห้ามสร้างหรือแก้ไขเอกสาร — ตอบคำถามเพียงอย่างเดียว"
+            "- ตอบเป็น plain text ธรรมดา (เว้นแต่ได้รับคำสั่งแก้ไขเอกสาร)"
+            f"{edit_instruction}"
         )
 
     user_parts = [f"คำถาม: {query}"]
     if context_text:
         user_parts.append(f"=== บริบทจากเอกสาร ===\n{context_text}")
-    # ส่ง editor_content เฉพาะ research mode — ตัด tail 1,500 chars เพื่อลด tokens
-    if research_mode and editor_content and editor_content.strip():
-        editor_tail = editor_content.strip()[-1500:]
+    # Include editor content for both research and chat modes (different limits)
+    if editor_content and editor_content.strip():
+        if research_mode:
+            editor_tail = editor_content.strip()[-1500:]
+        else:
+            # Chat mode: smaller budget (800 chars) to save ~300 tokens
+            editor_tail = editor_content.strip()[-800:]
         user_parts.append(f"=== เนื้อหาในตัวแก้ไขปัจจุบัน (ส่วนท้าย) ===\n{editor_tail}")
 
     # Build messages: system + chat history (last 4, each capped at 400 chars) + current user message
@@ -325,7 +449,13 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
     # ── Step 2: Call API ───────────────────────────────────────────────────────
     # OpenThaiGPT context window = 16,384 tokens (input + output).
     # Reserve headroom for input tokens to avoid 400 errors.
-    api_max_tokens = 8192 if research_mode else 2048
+    _edit_capable = kwargs.get("edit_capable", False)
+    if research_mode:
+        api_max_tokens = 8192
+    elif _edit_capable:
+        api_max_tokens = 4096  # edit needs room for full editor content
+    else:
+        api_max_tokens = 2048
     api_temperature = 0.65 if research_mode else 0.3
     try:
         raw, ri, ro = _call_api(messages, api_key, max_tokens=api_max_tokens, temperature=api_temperature)
@@ -347,9 +477,25 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
     think_prefix = '\n'.join(think_matches).strip()
     raw_clean = _THINK_RE.sub('', raw).strip()
 
-    # ── Answer mode: plain text — no JSON parsing needed ─────────────────────
+    # ── Chat / Edit mode parsing ─────────────────────────────────────────────
     if not research_mode:
-        response_text = raw_clean
+        # Check if LLM returned an edit-action JSON (only when edit_capable)
+        if _edit_capable:
+            parsed_edit = _extract_json(raw_clean)
+            if parsed_edit and parsed_edit.get("action") == "edit":
+                response_text = str(parsed_edit.get("response", "")).strip()
+                new_editor = parsed_edit.get("editor_content")
+                if isinstance(new_editor, str):
+                    new_editor = ensure_complete_sentence(new_editor.strip()) or None
+                else:
+                    new_editor = None
+                if think_prefix:
+                    response_text = (think_prefix + "\n\n" + response_text).strip()
+                if new_editor:
+                    return "edit", response_text, new_editor, total_input, total_output
+                # Fallback: JSON had action=edit but no editor_content → treat as chat
+
+        response_text = ensure_complete_sentence(raw_clean)
         if not has_context and not response_text.startswith("⚠️"):
             response_text = _PARAMETRIC_WARNING + "\n\n" + response_text
         if think_prefix:
@@ -384,7 +530,7 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
 
     new_editor = parsed.get("editor_content")
     if isinstance(new_editor, str):
-        new_editor = new_editor.strip() or None
+        new_editor = ensure_complete_sentence(new_editor.strip()) or None
     else:
         new_editor = None
 
@@ -451,8 +597,10 @@ def generate_section(topic, section_instruction, retrieved_docs=None,
     content, input_tokens, output_tokens = _call_api(
         messages, api_key, max_tokens=4096, temperature=0.65
     )
+    think_matches = re.findall(r'<think>(.*?)</think>', content, re.DOTALL)
+    think_text = '\n\n'.join(t.strip() for t in think_matches) if think_matches else ''
     content = _THINK_RE.sub('', content).strip()
-    return content, input_tokens, output_tokens
+    return think_text, content, input_tokens, output_tokens
 
 
 def generate_selection_edit(selected_text, instruction):
@@ -486,8 +634,10 @@ def generate_selection_edit(selected_text, instruction):
     content, input_tokens, output_tokens = _call_api(
         messages, api_key, max_tokens=2048, temperature=0.3
     )
+    think_matches = re.findall(r'<think>(.*?)</think>', content, re.DOTALL)
+    think_text = '\n\n'.join(t.strip() for t in think_matches) if think_matches else ''
     content = _THINK_RE.sub('', content).strip()
-    return content, input_tokens, output_tokens
+    return think_text, content, input_tokens, output_tokens
 
 
 def generate_insertion(context_before, context_after, instruction):
@@ -522,8 +672,10 @@ def generate_insertion(context_before, context_after, instruction):
     content, input_tokens, output_tokens = _call_api(
         messages, api_key, max_tokens=2048, temperature=0.3
     )
+    think_matches = re.findall(r'<think>(.*?)</think>', content, re.DOTALL)
+    think_text = '\n\n'.join(t.strip() for t in think_matches) if think_matches else ''
     content = _THINK_RE.sub('', content).strip()
-    return content, input_tokens, output_tokens
+    return think_text, content, input_tokens, output_tokens
 
 
 def generate_answer_stream(query: str, retrieved_docs: list,
@@ -584,10 +736,17 @@ def generate_answer_stream(query: str, retrieved_docs: list,
             "ไม่มีเอกสารถูกโหลดไว้ — ตอบจากความรู้ทั่วไปของ AI ได้เลย"
         )
 
+    editor_awareness = ""
+    if editor_content and editor_content.strip():
+        editor_awareness = (
+            "\nคุณรับรู้เนื้อหาในตัวแก้ไขของผู้ใช้ สามารถตอบคำถามเกี่ยวกับเนื้อหานั้นได้"
+        )
+
     system_prompt = (
         "คุณเป็นผู้ช่วยวิจัย ทำหน้าที่ตอบคำถามอย่างตรงประเด็นและถูกต้อง\n"
         f"{knowledge_instruction}\n"
-        f"{language_instruction}\n\n"
+        f"{language_instruction}"
+        f"{editor_awareness}\n\n"
         "แนวทางการตอบ:\n"
         "- ตอบตรงคำถาม ชัดเจน ครบถ้วน\n"
         "- ตอบเป็น plain text ธรรมดา ไม่ต้องมี JSON"
@@ -596,6 +755,10 @@ def generate_answer_stream(query: str, retrieved_docs: list,
     user_parts = [f"คำถาม: {query}"]
     if context_text:
         user_parts.append(f"=== บริบทจากเอกสาร ===\n{context_text}")
+    # Include editor content (truncated to 800 chars) for context awareness
+    if editor_content and editor_content.strip():
+        editor_tail = editor_content.strip()[-800:]
+        user_parts.append(f"=== เนื้อหาในตัวแก้ไขปัจจุบัน (ส่วนท้าย) ===\n{editor_tail}")
 
     messages = [{"role": "system", "content": system_prompt}]
     if chat_history:

@@ -92,6 +92,11 @@ def review_research(content: str, user_focus: str = "") -> tuple:
         messages, api_key, max_tokens=4096, temperature=0.3
     )
 
-    # Strip <think> tags if present
+    # Preserve <think> content separately; strip from review body
+    think_matches = re.findall(r'<think>(.*?)</think>', raw, re.DOTALL)
+    think_text = '\n\n'.join(t.strip() for t in think_matches) if think_matches else ''
     review_text = _THINK_RE.sub('', raw).strip()
+    # Re-attach think block at the top so app.py's parse_think_content() can surface it
+    if think_text:
+        review_text = f"<think>{think_text}</think>\n\n{review_text}"
     return review_text, input_tokens, output_tokens

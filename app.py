@@ -36,6 +36,7 @@ from generator import (
     generate_insertion,
     generate_section,
     is_small_talk,
+    is_edit_intent,
     _PARAMETRIC_WARNING,
 )
 from reviewer import review_research
@@ -305,6 +306,10 @@ def _show_login_page():
                 Sign in with Google
             </a>
             <p class="login-footer">Secure authentication powered by Google OAuth 2.0</p>
+            <div style="margin-top:20px;padding:12px 16px;background:#f8faff;border-radius:10px;font-family:'Prompt',sans-serif;font-size:0.82rem;color:#475569;line-height:2;">
+                <div>👥 ระบบนี้มีผู้ใช้งานทั้งหมด <strong style="color:#1e293b;">{database.get_total_users():,} คน</strong></div>
+                <div>🔢 มีการใช้ token ไปแล้ว &nbsp; input: <strong style="color:#1e293b;">{database.get_total_token_usage()['input_tokens']:,}</strong> &nbsp;|&nbsp; output: <strong style="color:#1e293b;">{database.get_total_token_usage()['output_tokens']:,}</strong></div>
+            </div>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -420,6 +425,8 @@ def main():
         ],
         "messages": [],
         "total_tokens": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
         "total_cost_thb": 0.0,
         "note_title_val": "",
         "note_content_val": "",
@@ -668,8 +675,8 @@ def main():
     }
 
     .stTextArea textarea {
-        font-size: 15px !important;
-        line-height: 1.85 !important;
+        font-size: 17px !important;
+        line-height: 1.9 !important;
         letter-spacing: 0.01em;
     }
 
@@ -747,6 +754,16 @@ def main():
     [data-testid="stMetricLabel"] {
         font-size: 0.75rem !important;
     }
+
+    /* ── Hide Streamlit's built-in "Limit 200MB per file" uploader hint ──
+       We show our own custom caption ("จำกัดสูงสุด 5 ไฟล์ · 5 MB ต่อไฟล์")
+       so the default helper text would create a conflicting double-caption.
+    ─────────────────────────────────────────────────────────────────────── */
+    [data-testid="stFileUploaderDropzoneInstructions"] div small,
+    [data-testid="stFileUploaderDropzoneInstructions"] small,
+    [data-testid="stFileUploaderDropzone"] small {
+        display: none !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -798,20 +815,58 @@ def main():
                 accept_multiple_files=True,
                 key="file_uploader_sidebar"
             )
+            st.caption("⚠️ จำกัดสูงสุด 5 ไฟล์ · ขนาดไฟล์สูงสุด 5 MB ต่อไฟล์")
 
             if uploaded_files:
                 st.caption(f"{len(uploaded_files)} file(s) selected")
                 if st.button("🔄 Process Documents", type="primary",
                              key="process_doc_btn", use_container_width=True):
+                    # ── Limit: max 5 docs total, max 5 MB per file ────────────
+                    _MAX_DOCS = 5
+                    _MAX_FILE_BYTES = 5 * 1024 * 1024  # 5 MB
+                    _current_doc_count = len(st.session_state.processed_docs)
+                    _slots_remaining = _MAX_DOCS - _current_doc_count
+
+                    # Filter out oversized files upfront
+                    _valid_files = []
+                    for _uf in uploaded_files:
+                        _file_size = len(_uf.getvalue())
+                        if _file_size == 0:
+                            st.error(f"❌ {_uf.name}: ไฟล์ว่างเปล่า ข้ามไฟล์นี้")
+                        elif _file_size > _MAX_FILE_BYTES:
+                            st.error(
+                                f"❌ {_uf.name}: ไฟล์ขนาดใหญ่เกินไป "
+                                f"({_file_size / 1024 / 1024:.1f} MB) — จำกัดสูงสุด 5 MB"
+                            )
+                        else:
+                            _valid_files.append(_uf)
+
+                    if _slots_remaining <= 0:
+                        st.error(
+                            f"❌ ถึงขีดจำกัด {_MAX_DOCS} ไฟล์แล้ว "
+                            "กรุณาลบเอกสารเก่าก่อนเพิ่มไฟล์ใหม่"
+                        )
+                        _valid_files = []
+                    elif len(_valid_files) > _slots_remaining:
+                        st.warning(
+                            f"⚠️ สามารถเพิ่มได้อีก {_slots_remaining} ไฟล์เท่านั้น "
+                            f"(จะประมวลผลเฉพาะ {_slots_remaining} ไฟล์แรก)"
+                        )
+                        _valid_files = _valid_files[:_slots_remaining]
+
                     all_child_chunks = []
                     all_parent_records = []
                     all_summary_docs = []
                     new_doc_entries = []
 
-                    with st.spinner(f"Processing {len(uploaded_files)} file(s) with Advanced RAG..."):
-                        for uploaded_file in uploaded_files:
+                    with st.spinner(f"Processing {len(_valid_files)} file(s) with Advanced RAG..."):
+                        for uploaded_file in _valid_files:
                             try:
                                 ext = os.path.splitext(uploaded_file.name)[1].lower()
+                                # Validate extension
+                                if ext not in ('.pdf', '.txt', '.docx', '.doc'):
+                                    st.error(f"❌ {uploaded_file.name}: ประเภทไฟล์ไม่รองรับ")
+                                    continue
                                 with tempfile.NamedTemporaryFile(
                                     delete=False, suffix=ext
                                 ) as tmp_file:
@@ -880,9 +935,11 @@ def main():
                                 )
                                 st.session_state.messages = []
                                 st.session_state.total_tokens = 0
+                                st.session_state.input_tokens = 0
+                                st.session_state.output_tokens = 0
                                 st.session_state.total_cost_thb = 0.0
                                 st.success(
-                                    f"✅ {len(new_doc_entries)}/{len(uploaded_files)} "
+                                    f"✅ {len(new_doc_entries)}/{len(_valid_files)} "
                                     "file(s) ready! (Advanced RAG)"
                                 )
                             except Exception as e:
@@ -1068,8 +1125,12 @@ def main():
                                     chunk_count=len(child_chunks),
                                 )
 
-                                total_tokens_turn = total_input_tokens + total_output_tokens
-                                st.session_state.total_tokens += total_tokens_turn
+                                st.session_state.total_tokens += total_input_tokens + total_output_tokens
+                                st.session_state.input_tokens += total_input_tokens
+                                st.session_state.output_tokens += total_output_tokens
+                                database.record_token_usage(
+                                    user_id, total_input_tokens, total_output_tokens, "web_scrape"
+                                )
 
                                 status.update(label="เสร็จสิ้น", state="complete")
                                 st.success(f"บันทึกแล้ว — **{auto_title}**")
@@ -1118,9 +1179,20 @@ def main():
     # ── Center: Research Workbench ─────────────────────────────────────────────────────
     with col_center:
         st.markdown("""
-        <div style="font-size:1.35rem;font-weight:700;color:#1f2937;padding:0.25rem 0 0.4rem 0;">
+        <div style="font-size:17px;font-weight:700;color:#1f2937;padding:0.25rem 0 0.2rem 0;">
             📝 Research Workbench
         </div>""", unsafe_allow_html=True)
+
+        _current_file_preview = st.session_state.get("work_current_file")
+        if _current_file_preview:
+            st.markdown(
+                f'<div style="font-family:\'Sarabun\',sans-serif;font-size:15px;'
+                f'color:#1d4ed8;font-weight:600;padding:2px 0 10px 0;">'
+                f'📄 กำลังทำงานกับไฟล์: <span style="font-style:italic;">{_current_file_preview}</span></div>',
+                unsafe_allow_html=True
+            )
+        else:
+            st.markdown('<div style="padding-bottom:10px;"></div>', unsafe_allow_html=True)
 
         work_title = st.text_input(
             "Title",
@@ -1135,6 +1207,24 @@ def main():
             height=400,
             key="work_content_input"
         )
+
+        # ── Character counter and limit warning ───────────────────────────
+        _EDITOR_CHAR_LIMIT = 50_000
+        _char_count = len(work_content)
+        _char_pct = _char_count / _EDITOR_CHAR_LIMIT
+        if _char_count >= _EDITOR_CHAR_LIMIT:
+            st.error(
+                f"เกินขีดจำกัด {_EDITOR_CHAR_LIMIT:,} ตัวอักษร "
+                f"({_char_count:,}/{_EDITOR_CHAR_LIMIT:,}) — "
+                "AI อาจทำงานไม่ถูกต้อง กรุณาลดเนื้อหา"
+            )
+        elif _char_pct >= 0.85:
+            st.warning(
+                f"⚠️ ใกล้ถึงขีดจำกัด: {_char_count:,}/{_EDITOR_CHAR_LIMIT:,} ตัวอักษร "
+                f"({_char_pct * 100:.0f}%)"
+            )
+        else:
+            st.caption(f"ตัวอักษร: {_char_count:,} / {_EDITOR_CHAR_LIMIT:,}")
 
         # ── Section-by-Section: สร้างเนื้อหาวิจัย ────────────────────────
         with st.expander("📝 สร้างเนื้อหาวิจัย", expanded=False):
@@ -1208,7 +1298,7 @@ def main():
 
                     with st.spinner(f"✍️ กำลังเขียน: {final_instruction[:50]}..."):
                         try:
-                            section_text, ri, ro = generate_section(
+                            sec_think, section_text, ri, ro = generate_section(
                                 topic=sec_topic.strip(),
                                 section_instruction=final_instruction,
                                 retrieved_docs=retrieved,
@@ -1225,13 +1315,18 @@ def main():
                             st.session_state["_pending_work_content"] = new_content
                             st.session_state.work_content_val = new_content
 
-                            total_tokens_turn = ri + ro
-                            st.session_state.total_tokens += total_tokens_turn
+                            st.session_state.total_tokens += ri + ro
+                            st.session_state.input_tokens += ri
+                            st.session_state.output_tokens += ro
+                            database.record_token_usage(user_id, ri, ro, "generate_section")
 
+                            _sec_msg = f"📝 เขียนส่วน \"{final_instruction[:60]}\" เสร็จแล้ว — ต่อท้ายใน editor"
+                            if sec_think:
+                                _sec_msg = f"<think>{sec_think}</think>\n\n{_sec_msg}"
                             st.session_state.messages.append({
                                 "role": "assistant",
-                                "content": f"📝 เขียนส่วน \"{final_instruction[:60]}\" เสร็จแล้ว — ต่อท้ายใน editor",
-                                "tokens": total_tokens_turn,
+                                "content": _sec_msg,
+                                "tokens": ri + ro,
                                 "action": "edit",
                             })
                             st.rerun()
@@ -1261,8 +1356,10 @@ def main():
                                 editor_text,
                                 user_focus=review_focus,
                             )
-                            total_tokens_turn = ri + ro
-                            st.session_state.total_tokens += total_tokens_turn
+                            st.session_state.total_tokens += ri + ro
+                            st.session_state.input_tokens += ri
+                            st.session_state.output_tokens += ro
+                            database.record_token_usage(user_id, ri, ro, "review_research")
                             st.session_state.review_result = review_text
                             st.session_state.review_expanded = True
                             st.rerun()
@@ -1391,8 +1488,6 @@ def main():
                     st.rerun()
 
         current_file = st.session_state.get("work_current_file")
-        if current_file:
-            st.caption(f"📄 `{current_file}`")
 
         # ── Row 1: File actions ────────────────────────────────────────────
         c_save, c_saveas, c_load, c_export, c_import = st.columns(5)
@@ -1436,31 +1531,47 @@ def main():
                                              key="clear_editor_btn", use_container_width=True)
 
         # ── Button logic ───────────────────────────────────────────────────────
+        _MAX_SAVED_DOCS = 20
+
         if save_clicked:
             if not work_title.strip() or not work_content.strip():
                 st.warning("⚠️ Please enter both a title and content.")
             elif current_file:
-                # Overwrite existing doc by name in SQLite
+                # Overwrite existing doc by name in SQLite (no count increase)
                 save_work_to_db(user_id, current_file, work_title, work_content)
                 st.success(f"✅ Saved → `{current_file}`")
             else:
-                st.session_state.work_save_dialog = "save"
-                st.session_state.work_save_dialog_name = work_title
-                st.session_state.work_load_select = False
-                st.session_state.work_import_open = False
-                st.session_state.work_export_open = False
-                st.rerun()
+                _existing_count = len(list_work_docs(user_id))
+                if _existing_count >= _MAX_SAVED_DOCS:
+                    st.error(
+                        f"❌ ถึงขีดจำกัด {_MAX_SAVED_DOCS} ไฟล์ที่บันทึกไว้ "
+                        "กรุณาลบเอกสารเก่าก่อนบันทึกไฟล์ใหม่"
+                    )
+                else:
+                    st.session_state.work_save_dialog = "save"
+                    st.session_state.work_save_dialog_name = work_title
+                    st.session_state.work_load_select = False
+                    st.session_state.work_import_open = False
+                    st.session_state.work_export_open = False
+                    st.rerun()
 
         if save_as_clicked:
             if not work_title.strip() or not work_content.strip():
                 st.warning("⚠️ Please enter both a title and content.")
             else:
-                st.session_state.work_save_dialog = "save_as"
-                st.session_state.work_save_dialog_name = work_title
-                st.session_state.work_load_select = False
-                st.session_state.work_import_open = False
-                st.session_state.work_export_open = False
-                st.rerun()
+                _existing_count = len(list_work_docs(user_id))
+                if _existing_count >= _MAX_SAVED_DOCS:
+                    st.error(
+                        f"❌ ถึงขีดจำกัด {_MAX_SAVED_DOCS} ไฟล์ที่บันทึกไว้ "
+                        "กรุณาลบเอกสารเก่าก่อนบันทึกไฟล์ใหม่"
+                    )
+                else:
+                    st.session_state.work_save_dialog = "save_as"
+                    st.session_state.work_save_dialog_name = work_title
+                    st.session_state.work_load_select = False
+                    st.session_state.work_import_open = False
+                    st.session_state.work_export_open = False
+                    st.rerun()
 
         if load_work_clicked:
             st.session_state.work_load_select = True
@@ -1513,7 +1624,14 @@ def main():
         if st.session_state.review_result:
             with st.expander("🎓 ผลการตรวจจากอาจารย์ที่ปรึกษา",
                              expanded=st.session_state.review_expanded):
-                _render_review_result(st.session_state.review_result)
+                _review_think, _review_body = parse_think_content(st.session_state.review_result)
+                if _review_think:
+                    with st.expander("💭 ความคิด (Thinking)", expanded=False):
+                        st.markdown(
+                            f'<div class="think-block">{_review_think}</div>',
+                            unsafe_allow_html=True,
+                        )
+                _render_review_result(_review_body)
                 if st.button("🗑️ ล้างผลตรวจ", key="clear_review_btn",
                              use_container_width=True):
                     st.session_state.review_result = None
@@ -1523,7 +1641,15 @@ def main():
 
         # ── Session usage stats ────────────────────────────────────────────────
         with st.expander("📈 Session Usage", expanded=False):
-            st.metric("Total Tokens", f"{st.session_state.total_tokens:,}")
+            _in_tok = st.session_state.get("input_tokens", 0)
+            _out_tok = st.session_state.get("output_tokens", 0)
+            _total_tok = _in_tok + _out_tok
+            st.markdown(
+                f"**Input:** {_in_tok:,} tokens &nbsp;|&nbsp; "
+                f"**Output:** {_out_tok:,} tokens &nbsp;|&nbsp; "
+                f"**Total:** {_total_tok:,}",
+                unsafe_allow_html=True,
+            )
 
     # ── Right: Assistant Chat ─────────────────────────────────────────────────
     with col_right:
@@ -1550,7 +1676,7 @@ def main():
                                 st.caption("✏️ แก้ไขเอกสารแล้ว")
                             display_assistant_message(message["content"])
                             if "tokens" in message:
-                                st.caption(f"⏱️ {message['tokens']} tokens")
+                                st.caption(f"⏱️ {message['tokens']:,} tokens (turn)")
                             if "sources" in message:
                                 with st.expander("📚 แหล่งข้อมูล"):
                                     for i, doc in enumerate(message["sources"], 1):
@@ -1807,6 +1933,8 @@ def main():
                      use_container_width=True):
             st.session_state.messages = []
             st.session_state.total_tokens = 0
+            st.session_state.input_tokens = 0
+            st.session_state.output_tokens = 0
             st.session_state.total_cost_thb = 0.0
             st.rerun()
 
@@ -1819,7 +1947,7 @@ def main():
                     instruction = edit_data["i"]
 
                     with _chat_spinner_area, st.spinner("✏️ กำลังแก้ไขข้อความที่เลือก..."):
-                        edited, ri, ro = generate_selection_edit(
+                        sel_think, edited, ri, ro = generate_selection_edit(
                             selected, instruction
                         )
                         new_content = work_content.replace(selected, edited, 1)
@@ -1835,20 +1963,25 @@ def main():
                         if edit_start >= 0:
                             st.session_state["_highlight_sel"] = (edit_start, edit_start + len(edited))
 
-                        total_tokens_turn = ri + ro
-                        st.session_state.total_tokens += total_tokens_turn
+                        st.session_state.total_tokens += ri + ro
+                        st.session_state.input_tokens += ri
+                        st.session_state.output_tokens += ro
+                        database.record_token_usage(user_id, ri, ro, "generate_selection_edit")
 
+                        _edit_msg = (
+                            f"✏️ แก้ไขข้อความที่เลือกเรียบร้อยแล้ว\n\n"
+                            f"คำสั่ง: {instruction}"
+                        )
+                        if sel_think:
+                            _edit_msg = f"<think>{sel_think}</think>\n\n{_edit_msg}"
                         st.session_state.messages.append({
                             "role": "user",
                             "content": f"✏️ แก้ไขข้อความ: {instruction}",
                         })
                         st.session_state.messages.append({
                             "role": "assistant",
-                            "content": (
-                                f"✏️ แก้ไขข้อความที่เลือกเรียบร้อยแล้ว\n\n"
-                                f"คำสั่ง: {instruction}"
-                            ),
-                            "tokens": total_tokens_turn,
+                            "content": _edit_msg,
+                            "tokens": ri + ro,
                             "action": "edit",
                         })
                     st.rerun()
@@ -1869,7 +2002,7 @@ def main():
                     with _chat_spinner_area, st.spinner("➕ กำลังสร้างข้อความแทรก..."):
                         context_before = work_content[:cursor_pos]
                         context_after = work_content[cursor_pos:]
-                        inserted, ri, ro = generate_insertion(
+                        ins_think, inserted, ri, ro = generate_insertion(
                             context_before, context_after, instruction
                         )
                         new_content = context_before + inserted + context_after
@@ -1883,20 +2016,25 @@ def main():
 
                         st.session_state["_highlight_sel"] = (cursor_pos, cursor_pos + len(inserted))
 
-                        total_tokens_turn = ri + ro
-                        st.session_state.total_tokens += total_tokens_turn
+                        st.session_state.total_tokens += ri + ro
+                        st.session_state.input_tokens += ri
+                        st.session_state.output_tokens += ro
+                        database.record_token_usage(user_id, ri, ro, "generate_insertion")
 
+                        _ins_msg = (
+                            f"➕ แทรกข้อความเรียบร้อยแล้ว\n\n"
+                            f"คำสั่ง: {instruction}"
+                        )
+                        if ins_think:
+                            _ins_msg = f"<think>{ins_think}</think>\n\n{_ins_msg}"
                         st.session_state.messages.append({
                             "role": "user",
                             "content": f"➕ แทรกข้อความ: {instruction}",
                         })
                         st.session_state.messages.append({
                             "role": "assistant",
-                            "content": (
-                                f"➕ แทรกข้อความเรียบร้อยแล้ว\n\n"
-                                f"คำสั่ง: {instruction}"
-                            ),
-                            "tokens": total_tokens_turn,
+                            "content": _ins_msg,
+                            "tokens": ri + ro,
                             "action": "edit",
                         })
                     st.rerun()
@@ -1959,14 +2097,16 @@ def main():
                                 )
                             )
 
-                        total_tokens_turn = input_tokens + output_tokens
-                        st.session_state.total_tokens += total_tokens_turn
+                        st.session_state.total_tokens += input_tokens + output_tokens
+                        st.session_state.input_tokens += input_tokens
+                        st.session_state.output_tokens += output_tokens
+                        database.record_token_usage(user_id, input_tokens, output_tokens, "research_mode")
 
                         st.session_state.messages.append({
                             "role": "assistant",
                             "content": response_text,
                             "sources": retrieved_docs,
-                            "tokens": total_tokens_turn,
+                            "tokens": input_tokens + output_tokens,
                             "action": action,
                         })
 
@@ -1979,31 +2119,76 @@ def main():
                             st.session_state.work_content_val = new_editor_content
 
                     else:
-                        # Plain chat mode: stream tokens for low perceived latency.
-                        # st.write_stream() renders tokens as they arrive and
-                        # returns the complete accumulated string when done.
-                        stream_gen = generate_answer_stream(
-                            actual_query, retrieved_docs, chat_history,
-                            editor_content=work_content,
-                        )
-                        with st.chat_message("assistant"):
-                            streamed_text = st.write_stream(stream_gen)
+                        # ── Chat mode with edit intent detection ──────────
+                        # Lightweight local check: if user wants to edit the
+                        # editor, use non-streaming path (needs JSON parsing).
+                        _wants_edit = is_edit_intent(actual_query)
 
-                        # Prepend parametric warning if no RAG context
-                        if not retrieved_docs and not str(streamed_text).startswith("⚠️"):
-                            streamed_text = _PARAMETRIC_WARNING + "\n\n" + str(streamed_text)
+                        if _wants_edit:
+                            # Edit-capable chat: non-streaming, may return
+                            # action="edit" with new editor content
+                            spinner_text = "กำลังแก้ไขเอกสาร..."
+                            with _chat_spinner_area, st.spinner(spinner_text):
+                                action, response_text, new_editor_content, input_tokens, output_tokens = (
+                                    generate_answer(
+                                        actual_query, retrieved_docs, chat_history,
+                                        editor_content=work_content,
+                                        research_mode=False,
+                                        edit_capable=True,
+                                    )
+                                )
 
-                        # Approximate token count: 1 token ≈ 4 chars
-                        approx_tokens = max(1, len(str(streamed_text)) // 4)
-                        st.session_state.total_tokens += approx_tokens
+                            st.session_state.total_tokens += input_tokens + output_tokens
+                            st.session_state.input_tokens += input_tokens
+                            st.session_state.output_tokens += output_tokens
+                            database.record_token_usage(user_id, input_tokens, output_tokens, "chat_edit")
 
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": str(streamed_text),
-                            "sources": retrieved_docs,
-                            "tokens": approx_tokens,
-                            "action": "chat",
-                        })
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "content": response_text,
+                                "sources": retrieved_docs,
+                                "tokens": input_tokens + output_tokens,
+                                "action": action,
+                            })
+
+                            if action == "edit" and new_editor_content:
+                                st.session_state.ai_edit_undo_stack.append(work_content)
+                                if len(st.session_state.ai_edit_undo_stack) > 20:
+                                    st.session_state.ai_edit_undo_stack.pop(0)
+                                st.session_state.ai_edit_redo_stack = []
+                                st.session_state["_pending_work_content"] = new_editor_content
+                                st.session_state.work_content_val = new_editor_content
+
+                        else:
+                            # Plain chat mode: stream tokens for low perceived
+                            # latency. st.write_stream() renders tokens as they
+                            # arrive and returns the accumulated string when done.
+                            stream_gen = generate_answer_stream(
+                                actual_query, retrieved_docs, chat_history,
+                                editor_content=work_content,
+                            )
+                            with st.chat_message("assistant"):
+                                streamed_text = st.write_stream(stream_gen)
+
+                            # Prepend parametric warning if no RAG context
+                            if not retrieved_docs and not str(streamed_text).startswith("⚠️"):
+                                streamed_text = _PARAMETRIC_WARNING + "\n\n" + str(streamed_text)
+
+                            # Streaming mode: no token usage from API — approximate
+                            # 1 token ≈ 4 chars; all counted as output (input unknown)
+                            approx_out = max(1, len(str(streamed_text)) // 4)
+                            st.session_state.total_tokens += approx_out
+                            st.session_state.output_tokens += approx_out
+                            # Note: input tokens not available from stream; DB record omitted
+                            # to avoid misleading data (0 input would skew totals).
+
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "content": str(streamed_text),
+                                "sources": retrieved_docs,
+                                "tokens": approx_out,
+                                "action": "chat",
+                            })
 
                 except ValueError as e:
                     st.session_state.messages.append({

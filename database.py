@@ -91,6 +91,18 @@ def initialize_database():
             )
         ''')
 
+        # Token usage table — tracks per-session/turn input and output tokens
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS token_usage (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id        TEXT,
+                input_tokens   INTEGER DEFAULT 0,
+                output_tokens  INTEGER DEFAULT 0,
+                function_name  TEXT,
+                timestamp      DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         # Users table for Google OAuth
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
@@ -456,6 +468,15 @@ def get_user(user_id: str) -> dict | None:
         return None
 
 
+def get_total_users() -> int:
+    """Return the total number of registered users."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM users')
+        row = cursor.fetchone()
+        return row[0] if row else 0
+
+
 # ── Editor Documents (per-user file storage in SQLite) ───────────────────────
 
 def initialize_editor_documents_table():
@@ -535,6 +556,41 @@ def delete_editor_document(user_id: str, name: str) -> bool:
         )
         conn.commit()
         return cursor.rowcount > 0
+
+
+# ── Token Usage ───────────────────────────────────────────────────────────────
+
+def record_token_usage(user_id: str, input_tokens: int, output_tokens: int,
+                       function_name: str = "") -> int:
+    """Record a token usage event. Returns the new row ID."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'INSERT INTO token_usage (user_id, input_tokens, output_tokens, function_name) '
+            'VALUES (?, ?, ?, ?)',
+            (user_id, input_tokens, output_tokens, function_name)
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_total_token_usage(user_id: str = None) -> dict:
+    """Return total input/output tokens for a user (or all users if None)."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if user_id is not None:
+            cursor.execute(
+                'SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0) '
+                'FROM token_usage WHERE user_id = ?',
+                (user_id,)
+            )
+        else:
+            cursor.execute(
+                'SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0) '
+                'FROM token_usage'
+            )
+        row = cursor.fetchone()
+        return {'input_tokens': row[0], 'output_tokens': row[1]}
 
 
 # Initialize database on import (idempotent — CREATE TABLE IF NOT EXISTS)
