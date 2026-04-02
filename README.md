@@ -2,42 +2,44 @@
 
 ระบบค้นคว้าวิจัยอัจฉริยะที่รวม RAG (Retrieval-Augmented Generation) เข้ากับ editor สำหรับเขียนงานวิจัย รองรับภาษาไทยและอังกฤษ ใช้ OpenThaiGPT เป็น LLM หลัก
 
-An intelligent research platform combining RAG with a specialized text editor for academic research. Supports bilingual Thai/English content using OpenThaiGPT as the primary LLM.
+An intelligent research platform combining RAG with a specialized text editor for academic research. Supports bilingual Thai/English content using OpenThaiGPT as the primary LLM, Pinecone cloud vector store, and Google OAuth for multi-user isolation.
 
 ## Architecture Overview
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │                        app.py (Streamlit UI)                         │
+│                    Google OAuth 2.0 Login Screen                     │
 │                                                                      │
 │  ┌─────────────┐  ┌───────────────────────┐  ┌───────────────────┐  │
 │  │   Sidebar    │  │  Research Workbench    │  │  Assistant        │  │
 │  │  Documents   │  │   Title + Editor      │  │   Chat + RAG Q&A │  │
 │  │  Notes       │  │   Save / Load / Export│  │   Research Mode  │  │
-│  │  Web Pages   │  │                       │  │   Advisor Review │  │
+│  │  Web Pages   │  │   (SQLite-backed)     │  │   Advisor Review │  │
 │  └──────┬───────┘  └───────────┬───────────┘  └────────┬──────────┘  │
 │         │                      │                       │              │
 └─────────┼──────────────────────┼───────────────────────┼──────────────┘
           │                      │                       │
   ┌───────▼──────────┐   ┌──────▼───────┐   ┌──────────▼──────────┐
-  │ document_loader  │   │  user_data/  │   │    generator.py     │
-  │ PDF/TXT/DOCX     │   │  (local fs)  │   │  OpenThaiGPT API    │
-  │ Parent-Child     │   └──────────────┘   │  Query re-phrasing  │
-  │ Chunking         │                      │  Intent classifier  │
-  └───────┬──────────┘                      └──────────┬──────────┘
+  │ document_loader  │   │  database.py │   │    generator.py     │
+  │ PDF/TXT/DOCX     │   │  SQLite      │   │  OpenThaiGPT API    │
+  │ Parent-Child     │   │  editor docs │   │  Streaming output   │
+  │ Chunking         │   │  token usage │   │  Intent detection   │
+  └───────┬──────────┘   └──────────────┘   └──────────┬──────────┘
           │                                            │
   ┌───────▼──────────────────────────────────┐         │
   │           vector_store.py                │         │
-  │  HuggingFace Embeddings (local, no key)  │◄────────┘
-  │  Unified ChromaDB Collection             │
-  │  MMR + Parent-Child Retrieval            │
+  │  Pinecone (cloud, per-user namespaces)   │◄────────┘
+  │  multilingual-e5-large (Pinecone Infer.) │
+  │  Hybrid BM25+Vector Retrieval            │
+  │  Parent-Child Expansion                  │
   └───────┬──────────────────────────────────┘
           │
   ┌───────▼──────────┐    ┌──────────────────┐    ┌──────────────────┐
-  │  ChromaDB        │    │  database.py     │    │  reviewer.py     │
-  │  (Database/      │    │  SQLite          │    │  Thesis Advisor  │
-  │   unified_       │    │  Notes + Parents │    │  Review System   │
-  │   chroma_db/)    │    │  + Web Pages     │    │                  │
+  │  Pinecone Index  │    │  auth.py         │    │  reviewer.py     │
+  │  (wijaiwai)      │    │  Google OAuth    │    │  Thesis Advisor  │
+  │  Per-user        │    │  2.0 Login       │    │  Review System   │
+  │  namespaces      │    │                  │    │  Chunked review  │
   └──────────────────┘    └──────────────────┘    └──────────────────┘
 ```
 
@@ -46,19 +48,22 @@ An intelligent research platform combining RAG with a specialized text editor fo
 | Component | Technology |
 |-----------|-----------|
 | **Web UI** | Streamlit (3-panel layout) |
+| **Authentication** | Google OAuth 2.0 |
 | **LLM** | OpenThaiGPT API (supports Thai natively) |
-| **Embeddings** | HuggingFace `paraphrase-multilingual-MiniLM-L12-v2` (local, no API key, ~400MB) |
-| **Vector DB** | ChromaDB (local, single unified collection) |
+| **Embeddings** | Pinecone Inference API — `multilingual-e5-large` (1024-dim, supports Thai) |
+| **Vector DB** | Pinecone (cloud, per-user namespace isolation) |
 | **Relational DB** | SQLite (`Database/research_notes.db`) |
 | **Document Parsing** | PyPDF, docx2txt |
 | **Web Scraping** | Trafilatura + BeautifulSoup4 (fallback) |
-| **Framework** | LangChain Core + Community |
+| **Search** | Hybrid: BM25 (0.3) + vector (0.7) fusion |
 
 ## Installation
 
 ### Prerequisites
 
 - Python 3.8+
+- Pinecone account with an index named `wijaiwai` (1024-dim, cosine metric)
+- Google Cloud project with OAuth 2.0 credentials
 - Virtual environment (recommended)
 
 ### Setup
@@ -75,13 +80,21 @@ source venv/bin/activate
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Create .env file with your OpenThaiGPT API key
-echo "OPENTHAI_API_KEY=your_key_here" > .env
+# 3. Create .env file
 ```
 
-> **Note**: The `.env` file must contain just `OPENTHAI_API_KEY=your_key_here` — no quotes, no spaces around the `=`.
+Create `.env` in the project root:
+```
+OPENTHAI_API_KEY=your_openthaigpt_key
+PINECONE_API_KEY=your_pinecone_key
+PINECONE_INDEX_NAME=wijaiwai
+PINECONE_HOST=your_pinecone_host_url
+GOOGLE_CLIENT_ID=your_google_oauth_client_id
+GOOGLE_CLIENT_SECRET=your_google_oauth_client_secret
+GOOGLE_REDIRECT_URI=http://localhost:8501/oauth2callback
+```
 
-> **Note**: First run will download the embedding model (~400MB). Subsequent runs use the cached version.
+> **Note**: No quotes or spaces around `=` values.
 
 ## Quick Start
 
@@ -91,12 +104,12 @@ echo "OPENTHAI_API_KEY=your_key_here" > .env
 streamlit run app.py
 ```
 
-Opens at `http://localhost:8501` with three panels:
+Opens at `http://localhost:8501`. You will be prompted to log in with Google. After login, the three-panel interface is available:
 
 | Panel | Features |
 |-------|----------|
 | **Sidebar** (left) | Upload documents (PDF/TXT/DOCX/DOC), manage research notes, manage web pages |
-| **Research Workbench** (center) | Text editor with title, Save/Load/Export/Import, Undo/Redo |
+| **Research Workbench** (center) | Text editor with title, Save/Load/Export/Import, Undo/Redo — files stored per user in SQLite |
 | **Assistant** (right) | Chat Q&A with RAG, Research Mode, Advisor Review |
 
 ### CLI
@@ -107,40 +120,38 @@ python main.py --ingest path/to/document.pdf
 
 # Query the vector store
 python main.py --query "your question here"
-
-# With custom DB path and top-k
-python main.py --ingest doc.pdf --db ./my_db
-python main.py --query "question" --db ./my_db --k 5
 ```
 
 ## Features
 
+### Google OAuth Login
+All users authenticate via Google before accessing the platform. Each user's documents, notes, web pages, editor files, and vector data are fully isolated by their Google user ID.
+
 ### RAG-Powered Q&A
-Ask questions about your uploaded documents. The system retrieves relevant context using MMR (Maximal Marginal Relevance) search and generates answers with OpenThaiGPT. Supports follow-up questions with automatic query re-phrasing based on chat history.
+Ask questions about your uploaded documents. The system retrieves relevant context using hybrid search (BM25 + vector fusion) scoped to your Pinecone namespace and generates answers with OpenThaiGPT. Supports follow-up questions with automatic query re-phrasing based on chat history. Streaming output for progressive display.
 
 ### Research Mode
-Toggle Research Mode for comprehensive, structured answers. The AI writes detailed research output (introduction, analysis, findings, summary, references) directly into the editor with a higher token budget (12,000 tokens).
+Toggle Research Mode for comprehensive, structured answers (≥1,000 words). The AI writes detailed research output (introduction, literature review, analysis, findings, summary, references) directly into the editor with a higher token budget (12,000 tokens).
 
 ### Agentic Editor
-The assistant classifies user intent as:
-- **Chat** — answers in the chat panel
-- **Edit** — writes or modifies content in the editor
-- **Research** — deep research with structured output to editor
-
-Selection-based editing: highlight text in the editor and ask the AI to modify just that selection.
+The assistant classifies user intent locally before any API call:
+- **Small talk** — skipped retrieval, lightweight response
+- **Edit** — writes or modifies content in the editor (selection-based editing supported)
+- **Chat** — answers in the chat panel with retrieved context
+- **Research** — deep research with structured output to editor, streaming
 
 ### Research Notes
-Create and manage notes that are embedded into the same vector store as documents. Notes become searchable alongside uploaded PDFs — great for annotations, summaries, and cross-referencing.
+Create and manage notes that are embedded into Pinecone alongside documents. Notes become searchable with `source_type='note'` — great for annotations, summaries, and cross-referencing.
 
 ### Web Content Integration
 Paste a URL to scrape and integrate web content:
 - Automatic content extraction (trafilatura with BeautifulSoup fallback)
 - AI-generated summaries and titles
-- Content is chunked and embedded into the unified vector store
+- Content is chunked and embedded into Pinecone (user namespace)
 - Metadata stored in SQLite for management
 
 ### Advisor Review
-Click the advisor button to get your research reviewed by a strict thesis advisor persona (simulating 20+ years of expertise). Reviews cover the standard 5-chapter thesis structure:
+Click the advisor button to get your research reviewed by a strict thesis advisor persona (simulating 20+ years of expertise). Automatically handles large documents via chunked processing. Reviews cover the standard 5-chapter thesis structure:
 - Chapter 1: Introduction, objectives, hypotheses, scope
 - Chapter 2: Literature review, theoretical framework
 - Chapter 3: Research methodology
@@ -153,23 +164,30 @@ Feedback is color-coded:
 - **Yellow** [คำแนะนำ] — Recommendations
 
 ### Advanced RAG Pipeline
-- **Rich Metadata** — Each chunk carries `paper_title`, `authors`, `year`, `section`, `source_type`, `created_at`
-- **Parent-Child Chunking** — Small child chunks in ChromaDB for precise vector search; parent content (full pages) in SQLite for richer LLM context
+- **Hybrid Search** — BM25 (0.3) + vector (0.7) fusion for improved retrieval quality
+- **Per-User Isolation** — All Pinecone queries scoped to user's namespace
+- **Rich Metadata** — Each chunk carries `paper_title`, `authors`, `year`, `section`, `source_type`, `doc_id`, `parent_id`, `created_at`
+- **Parent-Child Chunking** — Small child chunks in Pinecone for precise search; parent content (full pages) in SQLite for richer LLM context
 - **Summary Embedding** — Extractive summaries embedded alongside chunks for broad semantic matching
 - **Adaptive Chunk Sizing** — Auto-adjusts based on content length (<2k→300, 2k-10k→800, >10k→1200 chars)
-- **MMR Retrieval** — Maximal Marginal Relevance (lambda=0.6) for diverse, high-quality results
+- **Embedding Cache** — SHA-256 hashing avoids redundant Pinecone Inference API calls
+
+### Token Tracking
+Input/output tokens are tracked per user per function in SQLite (`token_usage` table). Cost displayed in THB at `$0.4 / 1M tokens` (1 USD = 35 THB).
 
 ## Module Breakdown
 
 | File | Responsibility |
 |---|---|
-| `app.py` | Streamlit UI, session state, `<think>` tag parsing, Research Workbench editor, 3-panel layout |
-| `generator.py` | OpenThaiGPT API calls, query re-phrasing, intent classification (chat/edit/research), editor manipulation |
-| `vector_store.py` | HuggingFace embeddings (local), unified ChromaDB collection, parent-child retrieval, MMR search |
+| `app.py` | Streamlit UI, Google OAuth splash, session state, `<think>` tag parsing, Research Workbench editor, 3-panel layout |
+| `auth.py` | Google OAuth 2.0 — auth URL generation, callback handling, user info fetch |
+| `generator.py` | OpenThaiGPT API calls, streaming output, query re-phrasing, local intent detection, editor manipulation |
+| `vector_store.py` | Pinecone cloud vector DB, hybrid retrieval, per-user namespaces, parent-child expansion |
 | `document_loader.py` | PDF/TXT/DOCX loading, metadata extraction, parent-child chunking, adaptive chunk sizing, summary embedding |
-| `database.py` | SQLite CRUD for notes, documents, parent chunks, and web pages |
-| `reviewer.py` | Research advisor review system with color-coded thesis feedback |
-| `web_scraper.py` | Web content extraction, AI summarization, content chunking into ChromaDB |
+| `database.py` | SQLite CRUD for notes, documents, parent chunks, web pages, editor documents, token usage, OAuth users |
+| `reviewer.py` | Research advisor review system with chunked processing and color-coded thesis feedback |
+| `web_scraper.py` | Web content extraction, AI summarization, content chunking into Pinecone |
+| `query_router.py` | Query classification and routing |
 | `main.py` | CLI entry point (`--ingest` / `--query` modes) |
 | `rag_pipeline.py` | Legacy Phase 1 (unused — do not modify) |
 
@@ -177,24 +195,24 @@ Feedback is color-coded:
 
 ```
 wijaiwaiv2.1/
-├── app.py                  # Streamlit Web UI (3-panel layout)
-├── generator.py            # OpenThaiGPT API integration + intent classifier
-├── vector_store.py         # HuggingFace embeddings + ChromaDB
+├── app.py                  # Streamlit Web UI (3-panel layout, OAuth login)
+├── auth.py                 # Google OAuth 2.0 integration
+├── generator.py            # OpenThaiGPT API + intent classifier + streaming
+├── vector_store.py         # Pinecone vector DB + hybrid retrieval
 ├── document_loader.py      # PDF/TXT/DOCX loading & chunking
-├── database.py             # SQLite CRUD (notes, parents, documents, web pages)
+├── database.py             # SQLite CRUD (7 tables, per-user data)
 ├── reviewer.py             # Thesis advisor review system
 ├── web_scraper.py          # Web content scraping & summarization
+├── query_router.py         # Query classification and routing
 ├── main.py                 # CLI entry point
 ├── rag_pipeline.py         # Legacy Phase 1 (unused)
 ├── requirements.txt        # Python dependencies
-├── .env                    # OPENTHAI_API_KEY (not committed)
+├── .env                    # API keys (not committed)
 ├── .gitignore
 ├── CLAUDE.md               # Claude Code guidance
 ├── README.md               # This file
 ├── Database/               # Auto-created on first run
-│   ├── research_notes.db   # SQLite database
-│   └── unified_chroma_db/  # ChromaDB vector store
-├── user_data/              # Saved research files from editor
+│   └── research_notes.db   # SQLite database (7 tables)
 └── md/                     # Design documents & task notes
 ```
 
@@ -203,15 +221,22 @@ wijaiwaiv2.1/
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `OPENTHAI_API_KEY` | Yes | OpenThaiGPT API key for LLM calls |
+| `PINECONE_API_KEY` | Yes | Pinecone API key for vector store |
+| `PINECONE_INDEX_NAME` | Yes | Pinecone index name (default: `wijaiwai`) |
+| `PINECONE_HOST` | Yes | Pinecone index host URL |
+| `GOOGLE_CLIENT_ID` | Yes | Google OAuth 2.0 client ID |
+| `GOOGLE_CLIENT_SECRET` | Yes | Google OAuth 2.0 client secret |
+| `GOOGLE_REDIRECT_URI` | Yes | OAuth callback URL (default: `http://localhost:8501/oauth2callback`) |
 
 ## Cost
 
 | Component | Cost |
 |-----------|------|
-| Embeddings (HuggingFace local) | Free |
-| ChromaDB (local) | Free |
+| Pinecone (Starter tier) | Free up to limits |
+| Pinecone Inference API (embeddings) | Pay-per-use |
 | SQLite (local) | Free |
 | OpenThaiGPT API | Free (ไม่มีค่าใช้จ่าย) |
+| Google OAuth | Free |
 
 ## License
 

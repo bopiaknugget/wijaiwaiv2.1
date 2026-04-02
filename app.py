@@ -1352,9 +1352,25 @@ def main():
                 else:
                     with st.spinner("🎓 อาจารย์กำลังตรวจงาน..."):
                         try:
+                            # RAG retrieval: use editor title + user focus as query
+                            _review_rag_query = (
+                                (work_title.strip() + " " + review_focus.strip()).strip()
+                                or editor_text[:200]
+                            )
+                            _review_retrieved = []
+                            try:
+                                _review_retrieved = enhanced_retrieve(
+                                    _review_rag_query, user_id, k=4,
+                                    embedding_model=embedding_model,
+                                    use_query_router=False,
+                                    use_reranker=True,
+                                )
+                            except Exception:
+                                _review_retrieved = []
                             review_text, ri, ro = review_research(
                                 editor_text,
                                 user_focus=review_focus,
+                                retrieved_docs=_review_retrieved,
                             )
                             st.session_state.total_tokens += ri + ro
                             st.session_state.input_tokens += ri
@@ -1947,8 +1963,21 @@ def main():
                     instruction = edit_data["i"]
 
                     with _chat_spinner_area, st.spinner("✏️ กำลังแก้ไขข้อความที่เลือก..."):
+                        # RAG retrieval: use instruction + selected snippet as query
+                        _sel_rag_query = f"{instruction} {selected[:150]}"
+                        _sel_retrieved = []
+                        try:
+                            _sel_retrieved = enhanced_retrieve(
+                                _sel_rag_query, user_id, k=3,
+                                embedding_model=embedding_model,
+                                use_query_router=True,
+                                use_reranker=False,
+                            )
+                        except Exception:
+                            _sel_retrieved = []
                         sel_think, edited, ri, ro = generate_selection_edit(
-                            selected, instruction
+                            selected, instruction,
+                            retrieved_docs=_sel_retrieved,
                         )
                         new_content = work_content.replace(selected, edited, 1)
 
@@ -2002,8 +2031,24 @@ def main():
                     with _chat_spinner_area, st.spinner("➕ กำลังสร้างข้อความแทรก..."):
                         context_before = work_content[:cursor_pos]
                         context_after = work_content[cursor_pos:]
+                        # RAG retrieval: use instruction + surrounding text as query
+                        _ins_surrounding = (
+                            context_before[-100:] + " " + context_after[:100]
+                        ).strip()
+                        _ins_rag_query = f"{instruction} {_ins_surrounding}"
+                        _ins_retrieved = []
+                        try:
+                            _ins_retrieved = enhanced_retrieve(
+                                _ins_rag_query, user_id, k=3,
+                                embedding_model=embedding_model,
+                                use_query_router=True,
+                                use_reranker=False,
+                            )
+                        except Exception:
+                            _ins_retrieved = []
                         ins_think, inserted, ri, ro = generate_insertion(
-                            context_before, context_after, instruction
+                            context_before, context_after, instruction,
+                            retrieved_docs=_ins_retrieved,
                         )
                         new_content = context_before + inserted + context_after
 

@@ -545,6 +545,28 @@ def generate_answer(query, retrieved_docs, chat_history=None, editor_content=Non
     return "research", response_text, new_editor, total_input, total_output
 
 
+def _rag_relevance_score(query: str, context_text: str) -> float:
+    """
+    Lightweight relevance check: returns a score 0.0–1.0 estimating how
+    semantically related the RAG context is to the query.
+
+    Uses token overlap (Thai-safe: split on whitespace + punctuation) so no
+    external library is required.  A score below 0.15 is treated as LOW
+    relevance and the caller should fall back to model knowledge.
+    """
+    if not query or not context_text:
+        return 0.0
+    import re as _re
+    def _tokens(text: str) -> set:
+        return set(_re.split(r'[\s\u0020-\u002F\u003A-\u0040\u005B-\u0060\u007B-\u007E]+', text.lower()))
+    q_tokens = _tokens(query) - {'', 'the', 'a', 'an', 'is', 'in', 'of', 'and', 'or', 'ที่', 'และ', 'ของ', 'ใน'}
+    c_tokens = _tokens(context_text)
+    if not q_tokens:
+        return 0.0
+    overlap = len(q_tokens & c_tokens)
+    return min(1.0, overlap / len(q_tokens))
+
+
 def generate_section(topic, section_instruction, retrieved_docs=None,
                      existing_content=""):
     """
@@ -554,11 +576,11 @@ def generate_section(topic, section_instruction, retrieved_docs=None,
     Args:
         topic: The overall document topic
         section_instruction: What to write in this section
-        retrieved_docs: Optional RAG context
+        retrieved_docs: Optional RAG context documents from vector store
         existing_content: Current editor content (for continuity)
 
     Returns:
-        tuple: (section_text, input_tokens, output_tokens)
+        tuple: (think_text, section_text, input_tokens, output_tokens)
     """
     env_path = Path(__file__).parent / ".env"
     load_dotenv(dotenv_path=env_path)
@@ -566,12 +588,30 @@ def generate_section(topic, section_instruction, retrieved_docs=None,
     if not api_key:
         raise ValueError("OPENTHAI_API_KEY not found")
 
-    context_text = ""
+    # ── RAG context: relevance-filtered ──────────────────────────────────────
     _MAX_DOC_CHARS = 1500
     _MAX_CONTEXT_CHARS = 6000
+    context_text = ""
+    rag_instruction = ""
     if retrieved_docs:
         parts = [doc.page_content[:_MAX_DOC_CHARS] for doc in retrieved_docs]
-        context_text = "\n\n".join(parts)[:_MAX_CONTEXT_CHARS]
+        raw_context = "\n\n".join(parts)[:_MAX_CONTEXT_CHARS]
+        relevance = _rag_relevance_score(f"{topic} {section_instruction}", raw_context)
+        if relevance >= 0.15:
+            context_text = raw_context
+            rag_instruction = (
+                "- ใช้บริบทจากเอกสารที่ให้มาเป็นข้อมูลอ้างอิงหลัก\n"
+                "- ห้ามแต่งหรือสร้างข้อมูล สถิติ หรือการอ้างอิงที่ไม่ปรากฏในเอกสาร\n"
+                "- หากไม่แน่ใจว่าข้อมูลมาจากเอกสาร ให้ระบุว่า 'ตามความรู้ทั่วไป' แทนการอ้างอิงเอกสาร\n"
+            )
+        # else: RAG not relevant — fall back to model knowledge, no rag_instruction
+
+    # ── Token safety: cap existing_content tail ───────────────────────────────
+    # Budget: ~6000 chars system + context (≈1500 tok) + 1500 existing + instruction
+    # This stays well under the 16K context window.
+    existing_tail = ""
+    if existing_content and existing_content.strip():
+        existing_tail = existing_content.strip()[-1500:]
 
     system_prompt = (
         "คุณเป็นนักเขียนวิชาการผู้เชี่ยวชาญ เขียนเนื้อหาทีละ section\n"
@@ -579,16 +619,16 @@ def generate_section(topic, section_instruction, retrieved_docs=None,
         "กฎการเขียน:\n"
         "- เขียนเฉพาะส่วนที่ได้รับมอบหมาย ห้ามเขียนส่วนอื่นหรือซ้ำกับเนื้อหาเดิม\n"
         "- ความยาวขั้นต่ำ 400 คำ, ≥4 ย่อหน้า — ขยายความละเอียด ยกตัวอย่าง อ้างทฤษฎี อธิบายกลไก\n"
-        "- ตอบเป็น plain text เท่านั้น ห้าม JSON ห้ามคำอธิบายเพิ่ม"
+        "- ตอบเป็น plain text เท่านั้น ห้าม JSON ห้ามคำอธิบายเพิ่ม\n"
+        + rag_instruction +
+        "- ห้ามสร้างการอ้างอิง ชื่อผู้แต่ง หรือสถิติที่ไม่มีหลักฐาน"
     )
 
     user_parts = [f"หัวข้อเอกสาร: {topic}", f"ส่วนที่ต้องเขียน: {section_instruction}"]
     if context_text:
-        user_parts.append(f"=== บริบทจากเอกสาร ===\n{context_text}")
-    if existing_content and existing_content.strip():
-        # Send only the last 1500 chars for continuity context
-        tail = existing_content.strip()[-1500:]
-        user_parts.append(f"=== เนื้อหาที่เขียนไปแล้ว (ส่วนท้าย) ===\n{tail}")
+        user_parts.append(f"=== บริบทจากเอกสาร (ใช้เป็นข้อมูลอ้างอิง) ===\n{context_text}")
+    if existing_tail:
+        user_parts.append(f"=== เนื้อหาที่เขียนไปแล้ว (ส่วนท้าย) ===\n{existing_tail}")
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -603,10 +643,17 @@ def generate_section(topic, section_instruction, retrieved_docs=None,
     return think_text, content, input_tokens, output_tokens
 
 
-def generate_selection_edit(selected_text, instruction):
+def generate_selection_edit(selected_text, instruction, retrieved_docs=None):
     """
     Edit a selected piece of text according to user instruction.
-    Returns (edited_text, input_tokens, output_tokens).
+
+    Args:
+        selected_text: The text the user has selected in the editor
+        instruction: The edit instruction from the user
+        retrieved_docs: Optional RAG context documents from vector store
+
+    Returns:
+        (think_text, edited_text, input_tokens, output_tokens)
     """
     env_path = Path(__file__).parent / ".env"
     load_dotenv(dotenv_path=env_path)
@@ -614,22 +661,45 @@ def generate_selection_edit(selected_text, instruction):
     if not api_key:
         raise ValueError("OPENTHAI_API_KEY not found")
 
+    # ── RAG context: relevance-filtered ──────────────────────────────────────
+    _MAX_DOC_CHARS = 1200
+    _MAX_CONTEXT_CHARS = 4000
+    context_text = ""
+    rag_instruction = ""
+    if retrieved_docs:
+        parts = [doc.page_content[:_MAX_DOC_CHARS] for doc in retrieved_docs]
+        raw_context = "\n\n".join(parts)[:_MAX_CONTEXT_CHARS]
+        # Check relevance against the instruction + selected text
+        relevance = _rag_relevance_score(f"{instruction} {selected_text[:200]}", raw_context)
+        if relevance >= 0.15:
+            context_text = raw_context
+            rag_instruction = (
+                "\n- ใช้ข้อมูลจากบริบทเอกสารที่ให้มาเพื่อเสริมความถูกต้องหากเกี่ยวข้อง"
+                "\n- ห้ามแต่งข้อมูล สถิติ หรือการอ้างอิงที่ไม่ปรากฏในเอกสาร"
+            )
+
     system_prompt = (
         "คุณเป็นผู้ช่วยแก้ไขข้อความ ผู้ใช้จะส่งข้อความที่เลือกไว้ "
         "พร้อมคำสั่งว่าต้องการแก้ไขอย่างไร\n"
         "ตอบเฉพาะข้อความที่แก้ไขแล้วเท่านั้น ห้ามมีคำอธิบายหรือข้อความเพิ่มเติม "
         "ห้ามใส่เครื่องหมายคำพูดครอบข้อความ\n"
-        "แก้ไขโดยรักษาภาษาเดิมของข้อความ หากคำสั่งเป็นภาษาไทยให้ตอบเป็นภาษาไทย"
+        "แก้ไขโดยรักษาภาษาเดิมของข้อความ หากคำสั่งเป็นภาษาไทยให้ตอบเป็นภาษาไทย\n"
+        "ห้ามสร้างข้อมูล ชื่อ หรือตัวเลขที่ไม่มีในข้อความเดิมหรือในบริบทเอกสาร"
+        + rag_instruction
     )
     _MAX_SELECTION_CHARS = 4000
     selected_text = selected_text[:_MAX_SELECTION_CHARS]
-    user_msg = (
-        f"ข้อความที่เลือก:\n\"\"\"\n{selected_text}\n\"\"\"\n\n"
-        f"คำสั่งแก้ไข: {instruction}"
-    )
+
+    user_parts = [
+        f"ข้อความที่เลือก:\n\"\"\"\n{selected_text}\n\"\"\"",
+        f"คำสั่งแก้ไข: {instruction}",
+    ]
+    if context_text:
+        user_parts.append(f"=== บริบทจากเอกสาร (ใช้อ้างอิงหากเกี่ยวข้อง) ===\n{context_text}")
+
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_msg},
+        {"role": "user", "content": "\n\n".join(user_parts)},
     ]
     content, input_tokens, output_tokens = _call_api(
         messages, api_key, max_tokens=2048, temperature=0.3
@@ -640,10 +710,19 @@ def generate_selection_edit(selected_text, instruction):
     return think_text, content, input_tokens, output_tokens
 
 
-def generate_insertion(context_before, context_after, instruction):
+def generate_insertion(context_before, context_after, instruction,
+                       retrieved_docs=None):
     """
     Generate text to insert at a cursor position based on surrounding context.
-    Returns (inserted_text, input_tokens, output_tokens).
+
+    Args:
+        context_before: Editor text before the cursor
+        context_after: Editor text after the cursor
+        instruction: The insertion instruction from the user
+        retrieved_docs: Optional RAG context documents from vector store
+
+    Returns:
+        (think_text, inserted_text, input_tokens, output_tokens)
     """
     env_path = Path(__file__).parent / ".env"
     load_dotenv(dotenv_path=env_path)
@@ -651,23 +730,47 @@ def generate_insertion(context_before, context_after, instruction):
     if not api_key:
         raise ValueError("OPENTHAI_API_KEY not found")
 
+    # ── RAG context: relevance-filtered ──────────────────────────────────────
+    _MAX_DOC_CHARS = 1200
+    _MAX_CONTEXT_CHARS = 4000
+    context_text = ""
+    rag_instruction = ""
+    if retrieved_docs:
+        parts = [doc.page_content[:_MAX_DOC_CHARS] for doc in retrieved_docs]
+        raw_context = "\n\n".join(parts)[:_MAX_CONTEXT_CHARS]
+        # Use instruction + surrounding text snippets for relevance check
+        surrounding = (context_before[-150:] + " " + context_after[:150]).strip()
+        relevance = _rag_relevance_score(f"{instruction} {surrounding}", raw_context)
+        if relevance >= 0.15:
+            context_text = raw_context
+            rag_instruction = (
+                "\n- ใช้ข้อมูลจากบริบทเอกสารที่ให้มาเพื่อความถูกต้องของเนื้อหาหากเกี่ยวข้อง"
+                "\n- ห้ามแต่งข้อมูล ตัวเลข หรือการอ้างอิงที่ไม่ปรากฏในเอกสาร"
+            )
+
     system_prompt = (
         "คุณเป็นผู้ช่วยเขียนข้อความ ผู้ใช้จะระบุบริบทก่อนและหลังตำแหน่งที่ต้องการแทรก "
         "พร้อมคำสั่งว่าต้องการแทรกข้อความอะไร\n"
         "ตอบเฉพาะข้อความที่ต้องแทรกเท่านั้น ห้ามมีคำอธิบายหรือข้อความเพิ่มเติม "
         "ห้ามใส่เครื่องหมายคำพูดครอบข้อความ\n"
-        "เขียนให้เข้ากับบริบทรอบข้าง รักษาภาษาเดิม หากคำสั่งเป็นภาษาไทยให้ตอบเป็นภาษาไทย"
+        "เขียนให้เข้ากับบริบทรอบข้าง รักษาภาษาเดิม หากคำสั่งเป็นภาษาไทยให้ตอบเป็นภาษาไทย\n"
+        "ห้ามสร้างข้อมูล ชื่อ หรือตัวเลขที่ไม่มีหลักฐาน"
+        + rag_instruction
     )
     before_preview = context_before[-300:] if len(context_before) > 300 else context_before
     after_preview = context_after[:300] if len(context_after) > 300 else context_after
-    user_msg = (
-        f"บริบทก่อนตำแหน่งแทรก:\n\"\"\"\n{before_preview}\n\"\"\"\n\n"
-        f"บริบทหลังตำแหน่งแทรก:\n\"\"\"\n{after_preview}\n\"\"\"\n\n"
-        f"คำสั่ง: {instruction}"
-    )
+
+    user_parts = [
+        f"บริบทก่อนตำแหน่งแทรก:\n\"\"\"\n{before_preview}\n\"\"\"",
+        f"บริบทหลังตำแหน่งแทรก:\n\"\"\"\n{after_preview}\n\"\"\"",
+        f"คำสั่ง: {instruction}",
+    ]
+    if context_text:
+        user_parts.append(f"=== บริบทจากเอกสาร (ใช้อ้างอิงหากเกี่ยวข้อง) ===\n{context_text}")
+
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_msg},
+        {"role": "user", "content": "\n\n".join(user_parts)},
     ]
     content, input_tokens, output_tokens = _call_api(
         messages, api_key, max_tokens=2048, temperature=0.3
