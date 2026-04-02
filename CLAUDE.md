@@ -2,7 +2,7 @@
 
 ## Rules
     - skip all permissions request (dangerously-skip-permissions)
-
+    - always use SKill context-hub (chub command) first before using relevant api to get api information (if chub be able to apply).
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 

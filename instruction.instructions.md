@@ -1,0 +1,5 @@
+@app.py @generator.py use @"AI-LLM-RAG-Engineer (agent)" to refactor app  
+  1.) In chat answering, let the assisant aware of content in editor, and able to answer question based on that content.
+  2.) In 'edit content and add content', the app must be able to use RAG database to find relevant content and add that content to editor, and also able to edit content in editor based on user instruction.
+  Optimization : balance token usage and latency, while preserve stablity and quality of answer.
+  Verification : test with various content in editor, and various question, and instruction from Thai mock data (also vary length of input), check if the answer is correct, and relevant to content in editor, and check if the latency is acceptable. **NO incompleted sentences at the end of result:first priority**  
