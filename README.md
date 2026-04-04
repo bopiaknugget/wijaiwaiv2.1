@@ -1,8 +1,6 @@
 # Research Workbench — AI-Powered RAG with Research Editor
 
-ระบบค้นคว้าวิจัยอัจฉริยะที่รวม RAG (Retrieval-Augmented Generation) เข้ากับ editor สำหรับเขียนงานวิจัย รองรับภาษาไทยและอังกฤษ ใช้ OpenThaiGPT เป็น LLM หลัก
-
-An intelligent research platform combining RAG with a specialized text editor for academic research. Supports bilingual Thai/English content using OpenThaiGPT as the primary LLM, Pinecone cloud vector store, and Google OAuth for multi-user isolation.
+An intelligent research platform combining RAG (Retrieval-Augmented Generation) with a specialized text editor for academic research. Supports bilingual Thai/English content using an LLM model as the primary backend, Pinecone cloud vector store, and Google OAuth for multi-user isolation.
 
 ## Architecture Overview
 
@@ -22,7 +20,7 @@ An intelligent research platform combining RAG with a specialized text editor fo
           │                      │                       │
   ┌───────▼──────────┐   ┌──────▼───────┐   ┌──────────▼──────────┐
   │ document_loader  │   │  database.py │   │    generator.py     │
-  │ PDF/TXT/DOCX     │   │  SQLite      │   │  OpenThaiGPT API    │
+  │ PDF/TXT/DOCX     │   │  SQLite      │   │  LLM model API      │
   │ Parent-Child     │   │  editor docs │   │  Streaming output   │
   │ Chunking         │   │  token usage │   │  Intent detection   │
   └───────┬──────────┘   └──────────────┘   └──────────┬──────────┘
@@ -49,7 +47,7 @@ An intelligent research platform combining RAG with a specialized text editor fo
 |-----------|-----------|
 | **Web UI** | Streamlit (3-panel layout) |
 | **Authentication** | Google OAuth 2.0 |
-| **LLM** | OpenThaiGPT API (supports Thai natively) |
+| **LLM** | LLM model API (Thai/English support) |
 | **Embeddings** | Pinecone Inference API — `multilingual-e5-large` (1024-dim, supports Thai) |
 | **Vector DB** | Pinecone (cloud, per-user namespace isolation) |
 | **Relational DB** | SQLite (`Database/research_notes.db`) |
@@ -85,7 +83,7 @@ pip install -r requirements.txt
 
 Create `.env` in the project root:
 ```
-OPENTHAI_API_KEY=your_openthaigpt_key
+LLM_API_KEY=your_llm_api_key
 PINECONE_API_KEY=your_pinecone_key
 PINECONE_INDEX_NAME=wijaiwai
 PINECONE_HOST=your_pinecone_host_url
@@ -128,10 +126,10 @@ python main.py --query "your question here"
 All users authenticate via Google before accessing the platform. Each user's documents, notes, web pages, editor files, and vector data are fully isolated by their Google user ID.
 
 ### RAG-Powered Q&A
-Ask questions about your uploaded documents. The system retrieves relevant context using hybrid search (BM25 + vector fusion) scoped to your Pinecone namespace and generates answers with OpenThaiGPT. Supports follow-up questions with automatic query re-phrasing based on chat history. Streaming output for progressive display.
+Ask questions about your uploaded documents. The system retrieves relevant context using hybrid search (BM25 + vector fusion) scoped to your Pinecone namespace and generates answers with the LLM model. Supports follow-up questions with automatic query re-phrasing based on chat history. Streaming output for progressive display.
 
 ### Research Mode
-Toggle Research Mode for comprehensive, structured answers (≥1,000 words). The AI writes detailed research output (introduction, literature review, analysis, findings, summary, references) directly into the editor with a higher token budget (12,000 tokens).
+Toggle Research Mode for comprehensive, structured answers (>=1,000 words). The LLM model writes detailed research output (introduction, literature review, analysis, findings, summary, references) directly into the editor with a higher token budget (12,000 tokens).
 
 ### Agentic Editor
 The assistant classifies user intent locally before any API call:
@@ -159,9 +157,9 @@ Click the advisor button to get your research reviewed by a strict thesis adviso
 - Chapter 5: Summary, discussion, recommendations
 
 Feedback is color-coded:
-- **Red** [ต้องแก้ไข] — Must fix
-- **Green** [ดีแล้ว] — Well done
-- **Yellow** [คำแนะนำ] — Recommendations
+- **Red** [Must fix] — Critical issues that require correction
+- **Green** [Well done] — Strong sections that meet expectations
+- **Yellow** [Recommendations] — Suggestions for improvement
 
 ### Advanced RAG Pipeline
 - **Hybrid Search** — BM25 (0.3) + vector (0.7) fusion for improved retrieval quality
@@ -181,7 +179,7 @@ Input/output tokens are tracked per user per function in SQLite (`token_usage` t
 |---|---|
 | `app.py` | Streamlit UI, Google OAuth splash, session state, `<think>` tag parsing, Research Workbench editor, 3-panel layout |
 | `auth.py` | Google OAuth 2.0 — auth URL generation, callback handling, user info fetch |
-| `generator.py` | OpenThaiGPT API calls, streaming output, query re-phrasing, local intent detection, editor manipulation |
+| `generator.py` | LLM model API calls, streaming output, query re-phrasing, local intent detection, editor manipulation |
 | `vector_store.py` | Pinecone cloud vector DB, hybrid retrieval, per-user namespaces, parent-child expansion |
 | `document_loader.py` | PDF/TXT/DOCX loading, metadata extraction, parent-child chunking, adaptive chunk sizing, summary embedding |
 | `database.py` | SQLite CRUD for notes, documents, parent chunks, web pages, editor documents, token usage, OAuth users |
@@ -197,7 +195,7 @@ Input/output tokens are tracked per user per function in SQLite (`token_usage` t
 wijaiwaiv2.1/
 ├── app.py                  # Streamlit Web UI (3-panel layout, OAuth login)
 ├── auth.py                 # Google OAuth 2.0 integration
-├── generator.py            # OpenThaiGPT API + intent classifier + streaming
+├── generator.py            # LLM model API + intent classifier + streaming
 ├── vector_store.py         # Pinecone vector DB + hybrid retrieval
 ├── document_loader.py      # PDF/TXT/DOCX loading & chunking
 ├── database.py             # SQLite CRUD (7 tables, per-user data)
@@ -220,7 +218,7 @@ wijaiwaiv2.1/
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `OPENTHAI_API_KEY` | Yes | OpenThaiGPT API key for LLM calls |
+| `LLM_API_KEY` | Yes | LLM model API key for language generation |
 | `PINECONE_API_KEY` | Yes | Pinecone API key for vector store |
 | `PINECONE_INDEX_NAME` | Yes | Pinecone index name (default: `wijaiwai`) |
 | `PINECONE_HOST` | Yes | Pinecone index host URL |
@@ -235,7 +233,7 @@ wijaiwaiv2.1/
 | Pinecone (Starter tier) | Free up to limits |
 | Pinecone Inference API (embeddings) | Pay-per-use |
 | SQLite (local) | Free |
-| OpenThaiGPT API | Free (ไม่มีค่าใช้จ่าย) |
+| LLM model API | Varies by provider |
 | Google OAuth | Free |
 
 ## License
