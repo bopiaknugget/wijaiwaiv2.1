@@ -307,7 +307,7 @@ def _show_login_page():
             </a>
             <p class="login-footer">Secure authentication powered by Google OAuth 2.0</p>
             <div style="margin-top:20px;padding:12px 16px;background:#f8faff;border-radius:10px;font-family:'Prompt',sans-serif;font-size:0.82rem;color:#475569;line-height:2;">
-                <div>👥 ระบบนี้มีผู้ใช้งานทั้งหมด <strong style="color:#1e293b;">{database.get_total_users():,} คน</strong></div>
+                <div>👥 จำนวนผู้ลงทะเบียนใช้งานในระบบ <strong style="color:#1e293b;">{database.get_total_users():,} คน</strong></div>
                 <div>🔢 มีการใช้ token ไปแล้ว &nbsp; input: <strong style="color:#1e293b;">{database.get_total_token_usage()['input_tokens']:,}</strong> &nbsp;|&nbsp; output: <strong style="color:#1e293b;">{database.get_total_token_usage()['output_tokens']:,}</strong></div>
             </div>
         </div>
