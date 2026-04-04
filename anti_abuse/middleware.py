@@ -105,7 +105,7 @@ def create_redis_client(
     redis_url: str = "redis://localhost:6379/0",
     socket_timeout: float = 1.0,
     socket_connect_timeout: float = 1.0,
-    max_connections: int = 50,
+    max_connections: int = 30,
     decode_responses: bool = True,
 ) -> redis.Redis:
     """
@@ -113,6 +113,10 @@ def create_redis_client(
 
     socket_timeout=1.0 means any Redis operation that takes more than 1 second
     raises redis.TimeoutError, which the limiters catch and fail-open on.
+
+    max_connections=30 is sized for 20 concurrent users with headroom.
+    protocol=3 enables RESP3 (Redis 7.x) for reduced parsing overhead.
+    socket_keepalive=True prevents silent connection drops under idle periods.
     """
     return redis.from_url(
         redis_url,
@@ -120,6 +124,8 @@ def create_redis_client(
         socket_connect_timeout=socket_connect_timeout,
         max_connections=max_connections,
         decode_responses=decode_responses,
+        socket_keepalive=True,
+        protocol=3,
     )
 
 

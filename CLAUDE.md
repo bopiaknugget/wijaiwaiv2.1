@@ -1,7 +1,14 @@
 # CLAUDE.md
 
 ## Rules
-    - skip all permissions request (dangerously-skip-permissions) with claude config set dangerouslySkipPermissions true
+
+## 1. CLI Execution Safety (CRITICAL)
+- **NO Path Resolution Bypass:** NEVER use compound commands containing `cd` combined with output redirection.
+- ❌ BAD: `cd api && echo "code" > agent.js`
+- ✅ GOOD: `echo "code" > api/agent.js`
+- Always execute commands directly on the target using relative or absolute paths to prevent manual approval interruptions.
+
+## 2. Always use `claude --dangerously-skip-permissions` for all sessions.
     - always utilize SKill context-hub (chub command) before using relevant api to get api information (if chub be able to apply).
         * use chub search [api-name] after get 'api-name' run chub get [retrieved-api-name] to get information about api
             Ex 1. Need information of openai api
