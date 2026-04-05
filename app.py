@@ -39,7 +39,7 @@ from generator import (
     is_edit_intent,
     _PARAMETRIC_WARNING,
 )
-from reviewer import review_research
+from reviewer import review_research, analyze_papers_critically_stream
 from web_scraper import scrape_url, summarize_content, generate_title, prepare_web_chunks
 from vector_store import (
     get_embedding_model,
@@ -447,6 +447,10 @@ def main():
         "review_expanded": True,
         "review_retrieved_docs": None,
         "section_retrieved_docs": None,
+        "compare_result": None,
+        "compare_expanded": True,
+        "compare_retrieved_docs": None,
+        "compare_selected_papers": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -823,9 +827,9 @@ def main():
                 st.caption(f"{len(uploaded_files)} file(s) selected")
                 if st.button("🔄 Process Documents", type="primary",
                              key="process_doc_btn", use_container_width=True):
-                    # ── Limit: max 5 docs total, max 5 MB per file ────────────
+                    # ── Limit: max 5 docs total, max 15 MB per file ───────────
                     _MAX_DOCS = 5
-                    _MAX_FILE_BYTES = 5 * 1024 * 1024  # 5 MB
+                    _MAX_FILE_BYTES = 15 * 1024 * 1024  # 15 MB
                     _current_doc_count = len(st.session_state.processed_docs)
                     _slots_remaining = _MAX_DOCS - _current_doc_count
 
@@ -838,7 +842,7 @@ def main():
                         elif _file_size > _MAX_FILE_BYTES:
                             st.error(
                                 f"❌ {_uf.name}: ไฟล์ขนาดใหญ่เกินไป "
-                                f"({_file_size / 1024 / 1024:.1f} MB) — จำกัดสูงสุด 5 MB"
+                                f"({_file_size / 1024 / 1024:.1f} MB) — จำกัดสูงสุด 15 MB"
                             )
                         else:
                             _valid_files.append(_uf)
@@ -1228,6 +1232,18 @@ def main():
         else:
             st.caption(f"ตัวอักษร: {_char_count:,} / {_EDITOR_CHAR_LIMIT:,}")
 
+        st.markdown(
+            "<style>div[data-testid='stButton']:has(button[kind='secondary']#clear_content_btn) button,"
+            "div[data-testid='stButton'] button[key='clear_content_btn'] { white-space: nowrap; }</style>",
+            unsafe_allow_html=True,
+        )
+        _ccol1, _ccol2 = st.columns([5, 2])
+        with _ccol2:
+            if st.button("🗑️ ล้างเนื้อหา", key="clear_content_btn", help="ล้างเนื้อหาทั้งหมดในตัวแก้ไข", use_container_width=True):
+                st.session_state.work_content_val = ""
+                st.session_state["_pending_work_content"] = ""
+                st.rerun()
+
         # ── Section-by-Section: สร้างเนื้อหาวิจัย ────────────────────────
         with st.expander("📝 สร้างเนื้อหาวิจัย", expanded=False):
             sec_topic = st.text_input(
@@ -1399,6 +1415,85 @@ def main():
                             st.rerun()
                         except Exception as e:
                             st.error(f"❌ เกิดข้อผิดพลาด: {str(e)}")
+
+        # ── Compare / Critically Analyze Papers Section ────────────────────────
+        with st.expander("🔬 วิเคราะห์-เปรียบเทียบงานวิจัย ในแหล่งความรู้", expanded=False):
+            _available_papers = [d["name"] for d in st.session_state.processed_docs]
+            if not _available_papers:
+                st.info("ℹ️ ยังไม่มีเอกสารในแหล่งความรู้ กรุณาอัปโหลดเอกสารก่อน")
+            else:
+                _valid_defaults = [
+                    p for p in st.session_state.compare_selected_papers
+                    if p in _available_papers
+                ]
+                _selected_papers = st.multiselect(
+                    "เลือกงานวิจัยที่ต้องการวิเคราะห์ (เลือกได้หลายรายการ)",
+                    options=_available_papers,
+                    default=_valid_defaults,
+                    key="compare_papers_multiselect",
+                    placeholder="เลือกอย่างน้อย 1 งานวิจัย...",
+                )
+                st.session_state.compare_selected_papers = _selected_papers
+
+                if st.button(
+                    "🔬 วิเคราะห์-เปรียบเทียบงานวิจัย ในแหล่งความรู้",
+                    type="primary",
+                    key="compare_papers_btn",
+                    use_container_width=True,
+                    disabled=len(_selected_papers) == 0,
+                ):
+                    try:
+                        _ANALYSIS_QUERY = (
+                            "บทคัดย่อ วัตถุประสงค์ ระเบียบวิธีวิจัย "
+                            "ผลการวิจัย สรุป ข้อค้นพบ"
+                        )
+                        with st.spinner("🔍 กำลังดึงข้อมูลงานวิจัยจากแหล่งความรู้..."):
+                            _all_retrieved = []
+                            _paper_sections = []
+                            for _pname in _selected_papers:
+                                _docs = retrieve_unified(
+                                    _ANALYSIS_QUERY,
+                                    user_id,
+                                    k=5,
+                                    source_type="document",
+                                    doc_name=_pname,
+                                    embedding_model=embedding_model,
+                                    expand_parents=True,
+                                    hybrid=True,
+                                )
+                                _all_retrieved.extend(_docs)
+                                _chunks_text = (
+                                    "\n\n".join(
+                                        d.page_content[:600] for d in _docs
+                                    )[:3000]
+                                    if _docs
+                                    else "ไม่พบข้อมูลสำหรับงานนี้ในแหล่งความรู้"
+                                )
+                                _paper_sections.append(
+                                    f"=== งานวิจัย: {_pname} ===\n{_chunks_text}"
+                                )
+                            _papers_context = "\n\n".join(_paper_sections)[:10000]
+                            st.session_state.compare_retrieved_docs = _all_retrieved
+
+                        st.markdown("### 🔬 กำลังวิเคราะห์...")
+                        _streamed = st.write_stream(
+                            analyze_papers_critically_stream(
+                                _papers_context, _selected_papers
+                            )
+                        )
+                        _approx_in = max(1, len(_papers_context) // 4)
+                        _approx_out = max(1, len(str(_streamed)) // 4)
+                        st.session_state.total_tokens += _approx_in + _approx_out
+                        st.session_state.input_tokens += _approx_in
+                        st.session_state.output_tokens += _approx_out
+                        database.record_token_usage(
+                            user_id, _approx_in, _approx_out, "compare_papers"
+                        )
+                        st.session_state.compare_result = str(_streamed)
+                        st.session_state.compare_expanded = True
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ เกิดข้อผิดพลาด: {str(e)}")
 
         # ── Load panel ─────────────────────────────────────────────────────────
         if st.session_state.get("work_load_select"):
@@ -1683,6 +1778,63 @@ def main():
                              use_container_width=True):
                     st.session_state.review_result = None
                     st.session_state.review_retrieved_docs = None
+                    st.rerun()
+
+        # ── Compare Papers Result (below editor) ──────────────────────────────
+        if st.session_state.compare_result:
+            with st.expander(
+                "🔬 ผลการวิเคราะห์เปรียบเทียบงานวิจัย",
+                expanded=st.session_state.compare_expanded,
+            ):
+                _cmp_think, _cmp_body = parse_think_content(
+                    st.session_state.compare_result
+                )
+                if _cmp_think:
+                    with st.expander("💭 ความคิด (Thinking)", expanded=False):
+                        st.markdown(
+                            f'<div class="think-block">{_cmp_think}</div>',
+                            unsafe_allow_html=True,
+                        )
+                st.markdown(_cmp_body)
+                _cmp_docs = st.session_state.get("compare_retrieved_docs")
+                if _cmp_docs is not None:
+                    _cmp_label = (
+                        f"📚 เอกสารอ้างอิงที่ใช้ — {len(_cmp_docs)} รายการ"
+                        if _cmp_docs
+                        else "📚 เอกสารอ้างอิงที่ใช้ — ไม่พบเอกสาร"
+                    )
+                    with st.expander(_cmp_label, expanded=False):
+                        if _cmp_docs:
+                            for i, doc in enumerate(_cmp_docs, 1):
+                                src_type = doc.metadata.get(
+                                    "source_type", doc.metadata.get("source", "doc")
+                                )
+                                label = (
+                                    "📝 Note"
+                                    if src_type in ("note", "research_note")
+                                    else f"📄 Doc {i}"
+                                )
+                                st.markdown(
+                                    f"**{label}:** "
+                                    f"{doc.metadata.get('paper_title', doc.metadata.get('filename', ''))}"
+                                )
+                                preview = doc.page_content
+                                st.text(
+                                    preview[:300] + "..."
+                                    if len(preview) > 300
+                                    else preview
+                                )
+                        else:
+                            st.caption(
+                                "ไม่พบเอกสารอ้างอิงที่เกี่ยวข้องใน Vector Database"
+                            )
+                if st.button(
+                    "🗑️ ล้างผลวิเคราะห์",
+                    key="clear_compare_btn",
+                    use_container_width=True,
+                ):
+                    st.session_state.compare_result = None
+                    st.session_state.compare_retrieved_docs = None
                     st.rerun()
 
         st.divider()

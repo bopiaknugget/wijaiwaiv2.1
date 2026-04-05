@@ -4,10 +4,12 @@ Reviews research writing quality as a rigorous thesis advisor,
 providing color-coded feedback (red/green/yellow).
 """
 
+import json
 import os
 import re
 import requests
 from pathlib import Path
+from typing import Generator
 from dotenv import load_dotenv
 
 API_URL = "http://thaillm.or.th/api/openthaigpt/v1/chat/completions"
@@ -32,6 +34,125 @@ def _call_api(messages, api_key, max_tokens=4096, temperature=0.3):
     content = data["choices"][0]["message"]["content"]
     usage = data.get("usage", {})
     return content, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+
+
+def _call_api_stream(messages, api_key, max_tokens=4096,
+                     temperature=0.3) -> Generator[str, None, None]:
+    """
+    Stream tokens from OpenThaiGPT via SSE (mirrors generator._call_api_stream).
+    Yields individual token strings. Falls back to single-chunk yield if the
+    server returns a non-streaming response.
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "apikey": api_key,
+        "Accept": "text/event-stream",
+    }
+    payload = {
+        "model": MODEL,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": True,
+    }
+    try:
+        with requests.post(
+            API_URL, headers=headers, json=payload,
+            timeout=120, stream=True
+        ) as response:
+            response.raise_for_status()
+            content_type = response.headers.get("Content-Type", "")
+            if "text/event-stream" not in content_type and "stream" not in content_type:
+                data = response.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                if content:
+                    yield content
+                return
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if not raw_line:
+                    continue
+                if raw_line.startswith("data: "):
+                    data_str = raw_line[6:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        delta = (
+                            chunk.get("choices", [{}])[0]
+                            .get("delta", {})
+                            .get("content", "")
+                        )
+                        if delta:
+                            yield delta
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        continue
+    except requests.RequestException:
+        raise
+
+
+PAPER_COMPARISON_SYSTEM_PROMPT = """\
+คุณคือ "นักวิจารณ์วิชาการอาวุโส" ประสบการณ์ 20+ ปี ในการประเมินงานวิจัยไทยและนานาชาติ
+ภารกิจ: วิเคราะห์เชิงวิพากษ์งานวิจัยที่ให้มา และเปรียบเทียบระหว่างงานหากมีหลายชิ้น
+
+โครงสร้างผลลัพธ์ที่ต้องการ (ใช้ Markdown):
+
+## ภาพรวม
+[สรุปสั้น 2-3 ประโยคเกี่ยวกับงานวิจัยที่นำมาวิเคราะห์]
+
+## วิเคราะห์แต่ละงานวิจัย
+[สำหรับแต่ละงาน ให้สร้าง subsection ดังนี้]
+### [ชื่องานวิจัย]
+- **จุดแข็ง:** [ระเบียบวิธี ผลลัพธ์ ความสำคัญ ความน่าเชื่อถือ]
+- **จุดอ่อน/ข้อจำกัด:** [ขอบเขต ความครบถ้วน ความเป็นปัจจุบัน ช่องว่าง]
+
+## การเปรียบเทียบและสังเคราะห์
+[เปรียบเทียบระเบียบวิธี กลุ่มตัวอย่าง ผลลัพธ์ ข้อสรุป ความสอดคล้องหรือขัดแย้งระหว่างงาน]
+
+## ช่องว่างการวิจัยและข้อเสนอแนะ
+[ประเด็นที่ยังไม่ได้ศึกษาหรือควรศึกษาต่อ ข้อเสนอแนะสำหรับนักวิจัย]
+
+กฎที่ต้องปฏิบัติ:
+- อิงเฉพาะข้อมูลที่ปรากฏในเนื้อหาที่ให้มา ห้ามสร้างหรืออ้างอิงข้อมูลที่ไม่มีจริง
+- หากข้อมูลของงานใดไม่เพียงพอสำหรับการวิเคราะห์ ให้ระบุ "ข้อมูลไม่เพียงพอสำหรับการวิเคราะห์เชิงลึก"
+- ใช้ภาษาวิชาการที่ชัดเจนและกระชับ ตอบเป็นภาษาไทยเป็นหลัก
+- ตรวจสอบว่าทุกข้อสรุปมีหลักฐานรองรับจากเนื้อหาที่ให้มาก่อนส่งคำตอบ
+"""
+
+
+def analyze_papers_critically_stream(
+    papers_context: str,
+    selected_paper_names: list,
+) -> Generator[str, None, None]:
+    """
+    Critically analyze and compare research papers stored in the knowledge base.
+
+    Args:
+        papers_context: Assembled text from retrieved chunks, labelled per paper.
+        selected_paper_names: Display names of the selected papers.
+
+    Yields:
+        str: Token strings from the streaming API response.
+    """
+    env_path = Path(__file__).parent / ".env"
+    load_dotenv(dotenv_path=env_path)
+    api_key = os.getenv("OPENTHAI_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "❌ OPENTHAI_API_KEY not found. Please ensure:\n"
+            f"  1. You have a .env file at: {env_path.resolve()}\n"
+            "  2. OPENTHAI_API_KEY=your_key_here is set (no quotes, no spaces)"
+        )
+
+    paper_list_str = "\n".join(f"- {name}" for name in selected_paper_names)
+    user_message = (
+        f"กรุณาวิเคราะห์เชิงวิพากษ์งานวิจัยต่อไปนี้:\n{paper_list_str}\n\n"
+        f"=== เนื้อหาจากแหล่งความรู้ ===\n{papers_context}"
+    )
+    messages = [
+        {"role": "system", "content": PAPER_COMPARISON_SYSTEM_PROMPT},
+        {"role": "user", "content": user_message},
+    ]
+    yield from _call_api_stream(messages, api_key, max_tokens=6144, temperature=0.4)
 
 
 ADVISOR_SYSTEM_PROMPT = """\
