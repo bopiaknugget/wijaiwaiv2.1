@@ -35,6 +35,7 @@ from generator import (
     generate_selection_edit,
     generate_insertion,
     generate_section,
+    generate_section_from_docs,
     is_small_talk,
     is_edit_intent,
     _PARAMETRIC_WARNING,
@@ -447,6 +448,7 @@ def main():
         "review_expanded": True,
         "review_retrieved_docs": None,
         "section_retrieved_docs": None,
+        "section_doc_result": None,
         "compare_result": None,
         "compare_expanded": True,
         "compare_retrieved_docs": None,
@@ -1253,6 +1255,13 @@ def main():
                 placeholder="เช่น ผลกระทบของ AI ต่อการศึกษา",
                 key="sec_topic_input",
             )
+            _gen_source = st.radio(
+                "แหล่งข้อมูล",
+                ["ความรู้ AI", "เอกสารที่เลือก"],
+                horizontal=True,
+                key="sec_gen_source",
+                label_visibility="collapsed",
+            )
             _input_mode = st.radio(
                 "วิธีระบุส่วนที่ต้องการเขียน",
                 ["เลือกจาก preset", "กำหนดเอง"],
@@ -1280,13 +1289,29 @@ def main():
                 sec_instruction = st.text_area(
                     "ส่วนที่ต้องการเขียน",
                     placeholder=(
-                        "เช่น บทนำ — ที่มาและความสำคัญของปัญหา\n"
-                        "หรือ ทบทวนวรรณกรรม — ทฤษฎีและงานวิจัยที่เกี่ยวข้อง"
+                        "กำหนดหัวข้อและรูปแบบเนื้อหาได้อิสระ ไม่จำกัดเฉพาะงานวิจัย\n"
+                        "เช่น บทความข่าว, บล็อก, ตัวอย่างการนำงานวิจัยมาปรับใช้"
                     ),
                     height=80,
                     key="sec_instruction_input",
                 )
                 preset_choice = None
+
+            if _gen_source == "เอกสารที่เลือก":
+                _kb_docs = database.load_all_documents(user_id)
+                _doc_names = [d["filename"] for d in _kb_docs]
+                if _doc_names:
+                    _selected_docs = st.multiselect(
+                        "เลือกเอกสารจาก Knowledge Base",
+                        options=_doc_names,
+                        key="sec_selected_docs",
+                        placeholder="เลือกอย่างน้อย 1 เอกสาร...",
+                    )
+                else:
+                    st.caption("ยังไม่มีเอกสารใน Knowledge Base")
+                    _selected_docs = []
+            else:
+                _selected_docs = []
 
             sec_generate = st.button(
                 "🚀 สร้างเนื้อหา",
@@ -1302,7 +1327,8 @@ def main():
                     st.warning("⚠️ กรุณาระบุหัวข้อเอกสาร")
                 elif not final_instruction:
                     st.warning("⚠️ กรุณาระบุส่วนที่ต้องการเขียน หรือเลือกจาก preset")
-                else:
+                elif _gen_source == "ความรู้ AI":
+                    # ── LLM mode: existing behaviour unchanged ────────────────
                     retrieved = []
                     try:
                         retrieved = enhanced_retrieve(
@@ -1354,6 +1380,83 @@ def main():
                             st.error(f"❌ API Error: {str(e)}")
                         except Exception as e:
                             st.error(f"❌ เกิดข้อผิดพลาดในการสร้างเนื้อหา: {str(e)}")
+                else:
+                    # ── Document mode: retrieve from selected docs then generate ─
+                    if not _selected_docs:
+                        st.warning("⚠️ กรุณาเลือกเอกสารอย่างน้อย 1 รายการ")
+                    else:
+                        retrieved = []
+                        for doc_name in _selected_docs:
+                            try:
+                                docs = retrieve_unified(
+                                    f"{sec_topic} {final_instruction}",
+                                    user_id, k=3, doc_name=doc_name,
+                                    embedding_model=embedding_model,
+                                )
+                                retrieved.extend(docs)
+                            except Exception as e:
+                                st.warning(f"⚠️ ดึงเอกสาร '{doc_name}' ไม่ได้: {e}")
+                        # Deduplicate by content[:100] fingerprint, cap at 9 total
+                        seen = set()
+                        deduped = []
+                        for d in retrieved:
+                            fp = d.page_content[:100]
+                            if fp not in seen:
+                                seen.add(fp)
+                                deduped.append(d)
+                        retrieved = deduped[:9]
+                        st.session_state.section_retrieved_docs = retrieved
+
+                        with st.spinner(f"✍️ กำลังเขียนจากเอกสาร: {final_instruction[:50]}..."):
+                            try:
+                                sec_think, section_text, ri, ro = generate_section_from_docs(
+                                    topic=sec_topic.strip(),
+                                    section_instruction=final_instruction,
+                                    retrieved_docs=retrieved,
+                                    existing_content=work_content,
+                                )
+                                st.session_state.section_doc_result = section_text
+                                if sec_think:
+                                    st.session_state.section_doc_result = (
+                                        f"<think>{sec_think}</think>\n\n{section_text}"
+                                    )
+
+                                st.session_state.total_tokens += ri + ro
+                                st.session_state.input_tokens += ri
+                                st.session_state.output_tokens += ro
+                                database.record_token_usage(user_id, ri, ro, "generate_section_from_docs")
+                                st.rerun()
+                            except ValueError as e:
+                                st.error(f"❌ API Error: {str(e)}")
+                            except Exception as e:
+                                st.error(f"❌ เกิดข้อผิดพลาดในการสร้างเนื้อหา: {str(e)}")
+
+        # ── Document-mode output display ──────────────────────────────────────
+        if st.session_state.get("section_doc_result"):
+            _sdoc_think, _sdoc_body = parse_think_content(st.session_state.section_doc_result)
+            if _sdoc_think:
+                with st.expander("💭 ความคิด (Thinking)", expanded=False):
+                    st.markdown(_sdoc_think)
+            with st.expander("📄 เนื้อหาที่สร้างจากเอกสาร", expanded=True):
+                st.markdown(_sdoc_body)
+            _sc1, _sc2 = st.columns(2)
+            with _sc1:
+                if st.button("📋 ส่งไปยัง Editor", key="sec_send_to_editor_btn", use_container_width=True):
+                    _cur = st.session_state.get("work_content_val", "")
+                    _sep = "\n\n" if _cur.strip() else ""
+                    _new = _cur + _sep + _sdoc_body
+                    st.session_state.ai_edit_undo_stack.append(_cur)
+                    if len(st.session_state.ai_edit_undo_stack) > 20:
+                        st.session_state.ai_edit_undo_stack.pop(0)
+                    st.session_state.ai_edit_redo_stack = []
+                    st.session_state["_pending_work_content"] = _new
+                    st.session_state.work_content_val = _new
+                    st.session_state.section_doc_result = None
+                    st.rerun()
+            with _sc2:
+                if st.button("🗑️ ล้างผล", key="sec_clear_result_btn", use_container_width=True):
+                    st.session_state.section_doc_result = None
+                    st.rerun()
 
         _sec_docs = st.session_state.get("section_retrieved_docs")
         if _sec_docs is not None:

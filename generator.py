@@ -656,6 +656,105 @@ def generate_section(topic, section_instruction, retrieved_docs=None,
     return think_text, content, input_tokens, output_tokens
 
 
+def generate_section_from_docs(topic, section_instruction, retrieved_docs=None,
+                               existing_content=""):
+    """
+    Generate a single section of long-form content grounded strictly in provided documents.
+    Used by the Section-by-Section mode when the user selects "เอกสารที่เลือก" as the source.
+
+    Unlike generate_section(), this function:
+    - Requires all factual claims to be traceable to the provided documents
+    - Labels non-document information with [ความรู้ทั่วไป]
+    - Emits a clear warning if no relevant document content is found (no hallucination)
+    - Uses a lower temperature (0.45) for higher faithfulness
+
+    Args:
+        topic: The overall document topic
+        section_instruction: What to write in this section
+        retrieved_docs: RAG context documents retrieved from vector store (required)
+        existing_content: Current editor content (for continuity)
+
+    Returns:
+        tuple: (think_text, section_text, input_tokens, output_tokens)
+    """
+    env_path = Path(__file__).parent / ".env"
+    load_dotenv(dotenv_path=env_path)
+    api_key = os.getenv("OPENTHAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENTHAI_API_KEY not found")
+
+    # ── RAG context: relevance-filtered ──────────────────────────────────────
+    _MAX_DOC_CHARS = 2000
+    _MAX_CONTEXT_CHARS = 8000
+    context_text = ""
+    has_relevant_docs = False
+    if retrieved_docs:
+        parts = [doc.page_content[:_MAX_DOC_CHARS] for doc in retrieved_docs]
+        raw_context = "\n\n".join(parts)[:_MAX_CONTEXT_CHARS]
+        relevance = _rag_relevance_score(f"{topic} {section_instruction}", raw_context)
+        if relevance >= 0.15:
+            context_text = raw_context
+            has_relevant_docs = True
+
+    # ── Token safety: cap existing_content tail ───────────────────────────────
+    existing_tail = ""
+    if existing_content and existing_content.strip():
+        existing_tail = existing_content.strip()[-1500:]
+
+    # ── Build system prompt ───────────────────────────────────────────────────
+    if has_relevant_docs:
+        grounding_rules = (
+            "- ข้อมูลทุกข้อต้องอ้างอิงจากเอกสารที่ให้มาเท่านั้น\n"
+            "- หากต้องการเพิ่มข้อมูลทั่วไปที่ไม่มีในเอกสาร ให้ระบุ [ความรู้ทั่วไป] ไว้หน้าข้อความนั้น\n"
+            "- ห้ามแต่งหรือสร้างข้อมูล สถิติ ชื่อผู้วิจัย หรือการอ้างอิงที่ไม่ปรากฏในเอกสาร\n"
+            "- ห้ามใส่การอ้างอิง (citation) ที่ไม่มีในเอกสารที่ให้มา\n"
+            "- เขียนให้ครอบคลุมเนื้อหาสำคัญจากเอกสารที่ให้มา\n"
+        )
+        no_docs_warning = ""
+    else:
+        grounding_rules = (
+            "- ไม่พบเอกสารที่เกี่ยวข้องกับหัวข้อนี้ในฐานข้อมูล\n"
+            "- ให้เริ่มต้นเนื้อหาด้วยคำเตือนนี้: "
+            "\"[คำเตือน: ไม่พบเอกสารอ้างอิงที่เกี่ยวข้อง เนื้อหาต่อไปนี้อาศัยความรู้ทั่วไปของ AI]\"\n"
+            "- ทุกย่อหน้าต้องมีป้ายกำกับ [ความรู้ทั่วไป] นำหน้า\n"
+            "- ห้ามแต่งข้อมูล สถิติ หรือการอ้างอิงที่ไม่มีหลักฐาน\n"
+        )
+        no_docs_warning = ""
+
+    system_prompt = (
+        "คุณเป็นนักเขียนวิชาการที่เน้นความถูกต้องและการอ้างอิงแหล่งที่มา เขียนเนื้อหาทีละ section\n"
+        "ภาษา: เขียนภาษาไทย ยกเว้นเอกสารที่ให้มาเป็นภาษาอังกฤษ ให้เขียนภาษาอังกฤษได้ "
+        "— technical terms ใช้อังกฤษได้เสมอ\n\n"
+        "กฎการเขียน:\n"
+        "- เขียนเฉพาะส่วนที่ได้รับมอบหมาย ห้ามเขียนส่วนอื่นหรือซ้ำกับเนื้อหาเดิม\n"
+        "- ความยาวขั้นต่ำ 400 คำ, ≥4 ย่อหน้า — ขยายความละเอียดจากเอกสารที่ให้มา\n"
+        "- ตอบเป็น plain text เท่านั้น ห้าม JSON ห้ามคำอธิบายเพิ่ม\n"
+        + grounding_rules +
+        "\nก่อนส่งผลลัพธ์ ให้ตรวจสอบภายในดังนี้ (ไม่ต้องแสดงในผลลัพธ์):\n"
+        "1. ข้อเท็จจริงทุกข้อ (ตัวเลข สถิติ ชื่อผู้วิจัย) มาจากเอกสารที่ให้มา — ถ้าไม่มีหลักฐาน ให้ใช้ [ความรู้ทั่วไป] หรือลบออก\n"
+        "2. เนื้อหาตรงตามส่วนที่ได้รับมอบหมายเท่านั้น\n"
+        "3. ไม่สร้างการอ้างอิง ชื่อผู้แต่ง หรือปีพิมพ์ที่ไม่ปรากฏในเอกสาร"
+    )
+
+    user_parts = [f"หัวข้อเอกสาร: {topic}", f"ส่วนที่ต้องเขียน: {section_instruction}"]
+    if context_text:
+        user_parts.append(f"=== เนื้อหาจากเอกสารที่เลือก (ใช้เป็นฐานข้อมูลหลัก) ===\n{context_text}")
+    if existing_tail:
+        user_parts.append(f"=== เนื้อหาที่เขียนไปแล้ว (ส่วนท้าย — ห้ามซ้ำ) ===\n{existing_tail}")
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+    content, input_tokens, output_tokens = _call_api(
+        messages, api_key, max_tokens=4096, temperature=0.45
+    )
+    think_matches = re.findall(r'<think>(.*?)</think>', content, re.DOTALL)
+    think_text = '\n\n'.join(t.strip() for t in think_matches) if think_matches else ''
+    content = _THINK_RE.sub('', content).strip()
+    return think_text, content, input_tokens, output_tokens
+
+
 def generate_selection_edit(selected_text, instruction, retrieved_docs=None):
     """
     Edit a selected piece of text according to user instruction.
