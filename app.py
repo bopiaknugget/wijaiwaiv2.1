@@ -815,16 +815,17 @@ def main():
         # ── Tab 1: Documents ──────────────────────────────────────────────────
         with sidebar_tab_docs:
             st.markdown("**Upload Documents**")
-            uploaded_files = st.file_uploader(
-                "Select files (PDF, TXT, DOCX, DOC)",
+            _uploaded_file = st.file_uploader(
+                "Select file (PDF, TXT, DOCX, DOC)",
                 type=["pdf", "txt", "docx", "doc"],
-                accept_multiple_files=True,
+                accept_multiple_files=False,
                 key="file_uploader_sidebar"
             )
-            st.caption("⚠️ จำกัดสูงสุด 5 ไฟล์ · ขนาดไฟล์สูงสุด 5 MB ต่อไฟล์")
+            st.caption("⚠️ อัปโหลดได้ครั้งละ 1 ไฟล์ · ขนาดไฟล์สูงสุด 15 MB")
+            uploaded_files = [_uploaded_file] if _uploaded_file is not None else []
 
             if uploaded_files:
-                st.caption(f"{len(uploaded_files)} file(s) selected")
+                st.caption(f"1 file selected: {uploaded_files[0].name}")
                 if st.button("🔄 Process Documents", type="primary",
                              key="process_doc_btn", use_container_width=True):
                     # ── Limit: max 5 docs total, max 15 MB per file ───────────
@@ -1425,14 +1426,17 @@ def main():
                 _valid_defaults = [
                     p for p in st.session_state.compare_selected_papers
                     if p in _available_papers
-                ]
+                ][:3]
                 _selected_papers = st.multiselect(
-                    "เลือกงานวิจัยที่ต้องการวิเคราะห์ (เลือกได้หลายรายการ)",
+                    "เลือกงานวิจัยที่ต้องการวิเคราะห์ (สูงสุด 3 งานวิจัย)",
                     options=_available_papers,
                     default=_valid_defaults,
                     key="compare_papers_multiselect",
                     placeholder="เลือกอย่างน้อย 1 งานวิจัย...",
                 )
+                if len(_selected_papers) > 3:
+                    st.warning("⚠️ เลือกได้สูงสุด 3 งานวิจัย — ระบบจะใช้เฉพาะ 3 รายการแรก")
+                    _selected_papers = _selected_papers[:3]
                 st.session_state.compare_selected_papers = _selected_papers
 
                 if st.button(
@@ -1443,36 +1447,46 @@ def main():
                     disabled=len(_selected_papers) == 0,
                 ):
                     try:
-                        _ANALYSIS_QUERY = (
-                            "บทคัดย่อ วัตถุประสงค์ ระเบียบวิธีวิจัย "
-                            "ผลการวิจัย สรุป ข้อค้นพบ"
+                        _QUERY_OBJECTIVES = (
+                            "วัตถุประสงค์การวิจัย คำถามวิจัย บทคัดย่อ กรอบทฤษฎีแนวคิด"
+                        )
+                        _QUERY_METHODS = (
+                            "ระเบียบวิธีวิจัย กลุ่มตัวอย่าง เครื่องมือวิจัย "
+                            "ผลการวิจัย ข้อค้นพบ ข้อสรุป ข้อจำกัด"
                         )
                         with st.spinner("🔍 กำลังดึงข้อมูลงานวิจัยจากแหล่งความรู้..."):
                             _all_retrieved = []
                             _paper_sections = []
                             for _pname in _selected_papers:
-                                _docs = retrieve_unified(
-                                    _ANALYSIS_QUERY,
-                                    user_id,
-                                    k=5,
-                                    source_type="document",
-                                    doc_name=_pname,
-                                    embedding_model=embedding_model,
-                                    expand_parents=True,
-                                    hybrid=True,
-                                )
-                                _all_retrieved.extend(_docs)
+                                _seen_fps: set = set()
+                                _merged_docs = []
+                                for _q in [_QUERY_OBJECTIVES, _QUERY_METHODS]:
+                                    for _d in retrieve_unified(
+                                        _q,
+                                        user_id,
+                                        k=5,
+                                        source_type="document",
+                                        doc_name=_pname,
+                                        embedding_model=embedding_model,
+                                        expand_parents=True,
+                                        hybrid=True,
+                                    ):
+                                        _fp = _d.page_content[:80]
+                                        if _fp not in _seen_fps:
+                                            _seen_fps.add(_fp)
+                                            _merged_docs.append(_d)
+                                _all_retrieved.extend(_merged_docs)
                                 _chunks_text = (
                                     "\n\n".join(
-                                        d.page_content[:600] for d in _docs
-                                    )[:3000]
-                                    if _docs
+                                        d.page_content[:800] for d in _merged_docs
+                                    )[:4800]
+                                    if _merged_docs
                                     else "ไม่พบข้อมูลสำหรับงานนี้ในแหล่งความรู้"
                                 )
                                 _paper_sections.append(
                                     f"=== งานวิจัย: {_pname} ===\n{_chunks_text}"
                                 )
-                            _papers_context = "\n\n".join(_paper_sections)[:10000]
+                            _papers_context = "\n\n".join(_paper_sections)[:13000]
                             st.session_state.compare_retrieved_docs = _all_retrieved
 
                         st.markdown("### 🔬 กำลังวิเคราะห์...")
