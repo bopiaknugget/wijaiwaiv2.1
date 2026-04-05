@@ -6,7 +6,8 @@
       "Bash(PYTHONIOENCODING=utf-8 python benchmark_prompts.py --save benchmark_results_before.json)",
       "Bash(PYTHONIOENCODING=utf-8 python benchmark_prompts.py --save benchmark_results_after.json)",
       "Bash(PYTHONIOENCODING=utf-8 python benchmark_prompts.py --compare benchmark_results_before.json benchmark_results_after.json)"
-    ]
+    ],
+    "defaultMode": "bypassPermissions"
   },
-  "outputStyle": "default"
+  "outputStyle": "Learning"
 }

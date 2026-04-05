@@ -445,6 +445,8 @@ def main():
         "ai_edit_redo_stack": [],
         "review_result": None,
         "review_expanded": True,
+        "review_retrieved_docs": None,
+        "section_retrieved_docs": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1295,6 +1297,7 @@ def main():
                         )
                     except Exception as e:
                         st.warning(f"⚠️ ไม่สามารถดึงบริบทจากเอกสารได้: {e}")
+                    st.session_state.section_retrieved_docs = retrieved
 
                     with st.spinner(f"✍️ กำลังเขียน: {final_instruction[:50]}..."):
                         try:
@@ -1335,6 +1338,20 @@ def main():
                         except Exception as e:
                             st.error(f"❌ เกิดข้อผิดพลาดในการสร้างเนื้อหา: {str(e)}")
 
+        _sec_docs = st.session_state.get("section_retrieved_docs")
+        if _sec_docs is not None:
+            _sec_label = f"📚 เอกสารอ้างอิงที่ใช้ (สร้างเนื้อหา) — {len(_sec_docs)} รายการ" if _sec_docs else "📚 เอกสารอ้างอิงที่ใช้ (สร้างเนื้อหา) — ไม่พบเอกสาร"
+            with st.expander(_sec_label, expanded=False):
+                if _sec_docs:
+                    for i, doc in enumerate(_sec_docs, 1):
+                        src_type = doc.metadata.get("source_type", doc.metadata.get("source", "doc"))
+                        label = "📝 Note" if src_type in ("note", "research_note") else f"📄 Doc {i}"
+                        st.markdown(f"**{label}:** {doc.metadata.get('paper_title', doc.metadata.get('filename', ''))}")
+                        preview = doc.page_content
+                        st.text(preview[:300] + "..." if len(preview) > 300 else preview)
+                else:
+                    st.caption("ไม่พบเอกสารอ้างอิงที่เกี่ยวข้องใน Vector Database — ใช้ความรู้ทั่วไปของ AI")
+
         # ── Advisor Review Section ────────────────────────────────────────
         with st.expander("🎓 ตรวจงานโดย AI", expanded=False):
             review_focus = st.text_area(
@@ -1367,6 +1384,7 @@ def main():
                                 )
                             except Exception:
                                 _review_retrieved = []
+                            st.session_state.review_retrieved_docs = _review_retrieved
                             review_text, ri, ro = review_research(
                                 editor_text,
                                 user_focus=review_focus,
@@ -1648,9 +1666,23 @@ def main():
                             unsafe_allow_html=True,
                         )
                 _render_review_result(_review_body)
+                _rev_docs = st.session_state.get("review_retrieved_docs")
+                if _rev_docs is not None:
+                    _rev_label = f"📚 เอกสารอ้างอิงที่ใช้ — {len(_rev_docs)} รายการ" if _rev_docs else "📚 เอกสารอ้างอิงที่ใช้ — ไม่พบเอกสาร"
+                    with st.expander(_rev_label, expanded=False):
+                        if _rev_docs:
+                            for i, doc in enumerate(_rev_docs, 1):
+                                src_type = doc.metadata.get("source_type", doc.metadata.get("source", "doc"))
+                                label = "📝 Note" if src_type in ("note", "research_note") else f"📄 Doc {i}"
+                                st.markdown(f"**{label}:** {doc.metadata.get('paper_title', doc.metadata.get('filename', ''))}")
+                                preview = doc.page_content
+                                st.text(preview[:300] + "..." if len(preview) > 300 else preview)
+                        else:
+                            st.caption("ไม่พบเอกสารอ้างอิงที่เกี่ยวข้องใน Vector Database — ใช้ความรู้ทั่วไปของ AI")
                 if st.button("🗑️ ล้างผลตรวจ", key="clear_review_btn",
                              use_container_width=True):
                     st.session_state.review_result = None
+                    st.session_state.review_retrieved_docs = None
                     st.rerun()
 
         st.divider()
@@ -1694,19 +1726,24 @@ def main():
                             if "tokens" in message:
                                 st.caption(f"⏱️ {message['tokens']:,} tokens (turn)")
                             if "sources" in message:
-                                with st.expander("📚 แหล่งข้อมูล"):
-                                    for i, doc in enumerate(message["sources"], 1):
-                                        src_type = doc.metadata.get("source", "doc")
-                                        label = (
-                                            "📝 Note" if src_type == "research_note"
-                                            else f"📄 Doc {i}"
-                                        )
-                                        st.markdown(f"**{label}:**")
-                                        preview = doc.page_content
-                                        st.text(
-                                            preview[:300] + "..."
-                                            if len(preview) > 300 else preview
-                                        )
+                                _msg_docs = message["sources"]
+                                _msg_label = f"📚 เอกสารอ้างอิงที่ใช้ — {len(_msg_docs)} รายการ" if _msg_docs else "📚 เอกสารอ้างอิงที่ใช้ — ไม่พบเอกสาร"
+                                with st.expander(_msg_label, expanded=False):
+                                    if _msg_docs:
+                                        for i, doc in enumerate(_msg_docs, 1):
+                                            src_type = doc.metadata.get("source_type", doc.metadata.get("source", "doc"))
+                                            label = (
+                                                "📝 Note" if src_type in ("note", "research_note")
+                                                else f"📄 Doc {i}"
+                                            )
+                                            st.markdown(f"**{label}:** {doc.metadata.get('paper_title', doc.metadata.get('filename', ''))}")
+                                            preview = doc.page_content
+                                            st.text(
+                                                preview[:300] + "..."
+                                                if len(preview) > 300 else preview
+                                            )
+                                    else:
+                                        st.caption("ไม่พบเอกสารอ้างอิงที่เกี่ยวข้องใน Vector Database — ใช้ความรู้ทั่วไปของ AI")
                         else:
                             st.write(message["content"])
 
@@ -2012,6 +2049,7 @@ def main():
                             "content": _edit_msg,
                             "tokens": ri + ro,
                             "action": "edit",
+                            "sources": _sel_retrieved,
                         })
                     st.rerun()
                 except Exception as e:
@@ -2081,6 +2119,7 @@ def main():
                             "content": _ins_msg,
                             "tokens": ri + ro,
                             "action": "edit",
+                            "sources": _ins_retrieved,
                         })
                     st.rerun()
                 except Exception as e:

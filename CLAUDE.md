@@ -1,19 +1,22 @@
 # CLAUDE.md
 
 ## Rules
-    - skip all permissions request (dangerously-skip-permissions) with claude config set dangerouslySkipPermissions true
-    - always utilize SKill context-hub (chub command) before using relevant api to get api information (if chub be able to apply).
-        * use chub search [api-name] after get 'api-name' run chub get [retrieved-api-name] to get information about api
-            Ex 1. Need information of openai api
-               2. search with 'chub search openai'
-               3. you will got list of openai related package such as 
-                    openai/chat  [doc]  go, js, py  [community]
-                    OpenAI API for text generation, chat completions, streami
-                4. Run 'chub get openai/chat --lang py' , to get information
-                5. **remark** you need to specify language with --lang argument if there are choices to pick
-     
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## 1. Always check the SKILL context-hub before using APIs:
+
+1. Search: `chub search [api-name]`
+2. Retrieve: `chub get [api-name] --lang [language]`
+3. Example: For OpenAI API with Python:
+   - `chub search openai`
+   - `chub get openai/chat --lang py`
+
+**Note:** Specify `--lang` when multiple language options exist.
+
+## 2. Context and Constraints
+- **LLM:** OpenThaiGPT with Pinecone RAG integration
+- **RAG Usage:** Only apply if semantically relevant to the task; avoid hallucinations and fabricated references
+- **Token Management:** If input exceeds limits, split by logical chunks (sections/headings) and process prioritized by: button action → relevant content → relevant RAG
+
 
 ## Project Summary
 
