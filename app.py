@@ -36,6 +36,8 @@ from generator import (
     generate_insertion,
     generate_section,
     generate_section_from_docs,
+    generate_section_stream,
+    generate_section_from_docs_stream,
     is_small_talk,
     is_edit_intent,
     _PARAMETRIC_WARNING,
@@ -146,36 +148,31 @@ _REVIEW_TAG_RE = re.compile(
 
 
 def _render_review_result(review_text: str):
-    """Render advisor review with color-coded blocks."""
-    import html as _html
+    """Render advisor review with color-coded blocks, preserving markdown."""
     lines = review_text.split('\n')
     current_tag = None
     current_lines = []
 
     def _flush():
         nonlocal current_tag, current_lines
-        content = _html.escape('\n'.join(current_lines).strip()).replace('\n', '<br>')
+        content = '\n'.join(current_lines).strip()
         if not content:
             current_lines = []
             return
         if current_tag and current_tag in _REVIEW_TAG_STYLES:
             s = _REVIEW_TAG_STYLES[current_tag]
+            # Render badge header, then markdown body separately so markdown is processed
             st.markdown(
                 f'<div style="background:{s["bg"]};border-left:4px solid {s["border"]};'
-                f'border-radius:8px;padding:10px 14px;margin:6px 0;'
-                f'color:{s["color"]};font-size:0.92rem;line-height:1.6;">'
-                f'<strong>{s["icon"]} [{s["label"]}]</strong> '
-                f'{content}</div>',
+                f'border-radius:8px 8px 0 0;padding:6px 14px;margin:6px 0 0 0;">'
+                f'<strong style="color:{s["color"]};font-size:0.92rem;">'
+                f'{s["icon"]} [{s["label"]}]</strong></div>',
                 unsafe_allow_html=True,
             )
+            st.markdown(content)
         else:
-            # General text (overview / summary)
-            st.markdown(
-                f'<div style="background:#f8fafc;border-radius:8px;'
-                f'padding:10px 14px;margin:6px 0;color:#334155;'
-                f'font-size:0.92rem;line-height:1.6;">{content}</div>',
-                unsafe_allow_html=True,
-            )
+            # General text (overview / summary) — render as plain markdown
+            st.markdown(content)
         current_lines = []
 
     for line in lines:
@@ -613,6 +610,25 @@ def main():
     .stTabs [data-baseweb="tab"],
     section[data-testid="stSidebar"] {
         font-family: 'Montserrat', 'Prompt', sans-serif !important;
+    }
+
+    /* ── Expander content: ensure font applies inside collapsed/expanded blocks ─
+       Streamlit expander content renders in its own stacking context and
+       can miss the base rule above on some Streamlit versions.
+    ─────────────────────────────────────────────────────────────── */
+    .streamlit-expanderContent .stMarkdown,
+    .streamlit-expanderContent p,
+    .streamlit-expanderContent li,
+    .streamlit-expanderContent h1,
+    .streamlit-expanderContent h2,
+    .streamlit-expanderContent h3,
+    .streamlit-expanderContent h4,
+    [data-testid="stExpander"] .stMarkdown,
+    [data-testid="stExpander"] p,
+    [data-testid="stExpander"] li {
+        font-family: 'Montserrat', 'Prompt', sans-serif !important;
+        font-size: 1rem;
+        line-height: 1.75;
     }
 
     /* ── Explicitly restore Material Symbols icon font ────────────
@@ -1253,7 +1269,7 @@ def main():
         # ── Section-by-Section: สร้างเนื้อหาวิจัย ────────────────────────
         with st.expander("📝 สร้างเนื้อหาวิจัย", expanded=False):
             sec_topic = st.text_input(
-                "หัวข้อเอกสาร",
+                "หัวข้อของเนื้อหาที่ต้องการสร้าง",
                 value=work_title if work_title.strip() else "",
                 placeholder="เช่น ผลกระทบของ AI ต่อการศึกษา",
                 key="sec_topic_input",
@@ -1331,42 +1347,28 @@ def main():
                 elif not final_instruction:
                     st.warning("⚠️ กรุณาระบุส่วนที่ต้องการเขียน หรือเลือกจาก preset")
                 elif _gen_source == "ความรู้ AI":
-                    # ── LLM mode: existing behaviour unchanged ────────────────
-                    retrieved = []
+                    # ── LLM mode: pure AI knowledge, no RAG ──────────────────
+                    st.markdown("### ✍️ กำลังสร้างเนื้อหา...")
                     try:
-                        retrieved = enhanced_retrieve(
-                            f"{sec_topic} {final_instruction}",
-                            user_id, k=3,
-                            embedding_model=embedding_model,
-                            use_query_router=True,
-                            use_reranker=True,
-                        )
-                    except Exception as e:
-                        st.warning(f"⚠️ ไม่สามารถดึงบริบทจากเอกสารได้: {e}")
-                    st.session_state.section_retrieved_docs = retrieved
-
-                    with st.spinner(f"✍️ กำลังเขียน: {final_instruction[:50]}..."):
-                        try:
-                            sec_think, section_text, ri, ro = generate_section(
+                        _streamed = st.write_stream(
+                            generate_section_stream(
                                 topic=sec_topic.strip(),
                                 section_instruction=final_instruction,
-                                retrieved_docs=retrieved,
                                 existing_content=work_content,
                             )
-
-                            st.session_state.section_llm_result = section_text
-                            st.session_state.section_llm_think = sec_think or ""
-                            st.session_state.section_llm_docs = retrieved
-
-                            st.session_state.total_tokens += ri + ro
-                            st.session_state.input_tokens += ri
-                            st.session_state.output_tokens += ro
-                            database.record_token_usage(user_id, ri, ro, "generate_section")
-                            st.rerun()
-                        except ValueError as e:
-                            st.error(f"❌ API Error: {str(e)}")
-                        except Exception as e:
-                            st.error(f"❌ เกิดข้อผิดพลาดในการสร้างเนื้อหา: {str(e)}")
+                        )
+                        _approx_in = max(1, (len(sec_topic) + len(final_instruction) + len(work_content[-1500:])) // 4)
+                        _approx_out = max(1, len(str(_streamed)) // 4)
+                        st.session_state.total_tokens += _approx_in + _approx_out
+                        st.session_state.input_tokens += _approx_in
+                        st.session_state.output_tokens += _approx_out
+                        database.record_token_usage(user_id, _approx_in, _approx_out, "generate_section")
+                        st.session_state.section_llm_result = str(_streamed)
+                        st.session_state.section_llm_think = ""
+                        st.session_state.section_llm_docs = []
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ เกิดข้อผิดพลาดในการสร้างเนื้อหา: {str(e)}")
                 else:
                     # ── Document mode: retrieve from selected docs then generate ─
                     if not _selected_docs:
@@ -1394,29 +1396,26 @@ def main():
                         retrieved = deduped[:9]
                         st.session_state.section_retrieved_docs = retrieved
 
-                        with st.spinner(f"✍️ กำลังเขียนจากเอกสาร: {final_instruction[:50]}..."):
-                            try:
-                                sec_think, section_text, ri, ro = generate_section_from_docs(
+                        st.markdown("### ✍️ กำลังเขียนจากเอกสาร...")
+                        try:
+                            _streamed = st.write_stream(
+                                generate_section_from_docs_stream(
                                     topic=sec_topic.strip(),
                                     section_instruction=final_instruction,
                                     retrieved_docs=retrieved,
                                     existing_content=work_content,
                                 )
-                                st.session_state.section_doc_result = section_text
-                                if sec_think:
-                                    st.session_state.section_doc_result = (
-                                        f"<think>{sec_think}</think>\n\n{section_text}"
-                                    )
-
-                                st.session_state.total_tokens += ri + ro
-                                st.session_state.input_tokens += ri
-                                st.session_state.output_tokens += ro
-                                database.record_token_usage(user_id, ri, ro, "generate_section_from_docs")
-                                st.rerun()
-                            except ValueError as e:
-                                st.error(f"❌ API Error: {str(e)}")
-                            except Exception as e:
-                                st.error(f"❌ เกิดข้อผิดพลาดในการสร้างเนื้อหา: {str(e)}")
+                            )
+                            _approx_in = max(1, sum(len(d.page_content) for d in retrieved) // 4)
+                            _approx_out = max(1, len(str(_streamed)) // 4)
+                            st.session_state.total_tokens += _approx_in + _approx_out
+                            st.session_state.input_tokens += _approx_in
+                            st.session_state.output_tokens += _approx_out
+                            database.record_token_usage(user_id, _approx_in, _approx_out, "generate_section_from_docs")
+                            st.session_state.section_doc_result = str(_streamed)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ เกิดข้อผิดพลาดในการสร้างเนื้อหา: {str(e)}")
 
         # ── Document-mode output display ──────────────────────────────────────
         if st.session_state.get("section_doc_result"):
@@ -1477,9 +1476,7 @@ def main():
 
         # ── LLM-mode output display ────────────────────────────────────────────
         if st.session_state.get("section_llm_result"):
-            _sllm_body = st.session_state.section_llm_result
-            _sllm_think = st.session_state.get("section_llm_think", "")
-            _sllm_docs = st.session_state.get("section_llm_docs", [])
+            _sllm_think, _sllm_body = parse_think_content(st.session_state.section_llm_result)
             with st.expander("📝 เนื้อหาที่สร้าง", expanded=True):
                 st.markdown(_sllm_body)
                 if _sllm_think:
@@ -1488,18 +1485,6 @@ def main():
                             f'<div class="think-block">{_sllm_think}</div>',
                             unsafe_allow_html=True,
                         )
-                if _sllm_docs is not None:
-                    _sllm_ref_label = f"📚 เอกสารอ้างอิงที่ใช้ — {len(_sllm_docs)} รายการ" if _sllm_docs else "📚 เอกสารอ้างอิงที่ใช้ — ไม่พบเอกสาร"
-                    with st.expander(_sllm_ref_label, expanded=False):
-                        if _sllm_docs:
-                            for i, doc in enumerate(_sllm_docs, 1):
-                                src_type = doc.metadata.get("source_type", doc.metadata.get("source", "doc"))
-                                label = "📝 Note" if src_type in ("note", "research_note") else f"📄 Doc {i}"
-                                st.markdown(f"**{label}:** {doc.metadata.get('paper_title', doc.metadata.get('filename', ''))}")
-                                preview = doc.page_content
-                                st.text(preview[:300] + "..." if len(preview) > 300 else preview)
-                        else:
-                            st.caption("ไม่พบเอกสารอ้างอิงที่เกี่ยวข้องใน Vector Database — ใช้ความรู้ทั่วไปของ AI")
             _slb1, _slb2, _slb3 = st.columns(3)
             with _slb1:
                 if st.button("📥 Replace Content in Editor", key="sec_llm_replace_btn", use_container_width=True):

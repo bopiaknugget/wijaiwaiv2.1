@@ -755,6 +755,127 @@ def generate_section_from_docs(topic, section_instruction, retrieved_docs=None,
     return think_text, content, input_tokens, output_tokens
 
 
+def generate_section_stream(
+    topic: str,
+    section_instruction: str,
+    existing_content: str = "",
+) -> Generator[str, None, None]:
+    """
+    Streaming version of generate_section() for use with st.write_stream().
+    Uses pure AI knowledge — no RAG retrieval, no document context.
+
+    Yields raw token strings as they arrive from the API.
+    """
+    env_path = Path(__file__).parent / ".env"
+    load_dotenv(dotenv_path=env_path)
+    api_key = os.getenv("OPENTHAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENTHAI_API_KEY not found")
+
+    existing_tail = existing_content.strip()[-1500:] if existing_content and existing_content.strip() else ""
+
+    system_prompt = (
+        "คุณเป็นนักเขียนวิชาการผู้เชี่ยวชาญ เขียนเนื้อหาทีละ section\n"
+        "ภาษา: ตอบภาษาเดียวกับคำสั่ง (default ไทย), technical terms ใช้อังกฤษได้\n\n"
+        "กฎการเขียน:\n"
+        "- เขียนเฉพาะส่วนที่ได้รับมอบหมาย ห้ามเขียนส่วนอื่นหรือซ้ำกับเนื้อหาเดิม\n"
+        "- ความยาวขั้นต่ำ 400 คำ, ≥4 ย่อหน้า — ขยายความละเอียด ยกตัวอย่าง อ้างทฤษฎี อธิบายกลไก\n"
+        "- ตอบเป็น plain text เท่านั้น ห้าม JSON ห้ามคำอธิบายเพิ่ม\n"
+        "- ใช้ความรู้ทั่วไปของ AI — ห้ามสร้างการอ้างอิง ชื่อผู้แต่ง หรือสถิติที่ไม่มีหลักฐาน\n"
+        "- ไม่ต้องระบุแหล่งที่มาหรือเชิงอรรถใดๆ\n\n"
+        "ก่อนส่งผลลัพธ์ ให้ตรวจสอบภายในดังนี้ (ไม่ต้องแสดงในผลลัพธ์):\n"
+        "1. เนื้อหาตรงตามส่วนที่ได้รับมอบหมายเท่านั้น\n"
+        "2. ไม่มีการสร้างการอ้างอิง ชื่อผู้แต่ง หรือสถิติที่ไม่แน่ใจ"
+    )
+
+    user_parts = [f"หัวข้อเอกสาร: {topic}", f"ส่วนที่ต้องเขียน: {section_instruction}"]
+    if existing_tail:
+        user_parts.append(f"=== เนื้อหาที่เขียนไปแล้ว (ส่วนท้าย) ===\n{existing_tail}")
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+    yield from _call_api_stream(messages, api_key, max_tokens=4096, temperature=0.65)
+
+
+def generate_section_from_docs_stream(
+    topic: str,
+    section_instruction: str,
+    retrieved_docs: list,
+    existing_content: str = "",
+) -> Generator[str, None, None]:
+    """
+    Streaming version of generate_section_from_docs() for use with st.write_stream().
+    Grounds the output strictly in the provided retrieved documents.
+
+    Yields raw token strings as they arrive from the API.
+    """
+    env_path = Path(__file__).parent / ".env"
+    load_dotenv(dotenv_path=env_path)
+    api_key = os.getenv("OPENTHAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENTHAI_API_KEY not found")
+
+    _MAX_DOC_CHARS = 2000
+    _MAX_CONTEXT_CHARS = 8000
+    context_text = ""
+    has_relevant_docs = False
+    if retrieved_docs:
+        parts = [doc.page_content[:_MAX_DOC_CHARS] for doc in retrieved_docs]
+        raw_context = "\n\n".join(parts)[:_MAX_CONTEXT_CHARS]
+        relevance = _rag_relevance_score(f"{topic} {section_instruction}", raw_context)
+        if relevance >= 0.15:
+            context_text = raw_context
+            has_relevant_docs = True
+
+    existing_tail = existing_content.strip()[-1500:] if existing_content and existing_content.strip() else ""
+
+    if has_relevant_docs:
+        grounding_rules = (
+            "- ข้อมูลทุกข้อต้องอ้างอิงจากเอกสารที่ให้มาเท่านั้น\n"
+            "- หากต้องการเพิ่มข้อมูลทั่วไปที่ไม่มีในเอกสาร ให้ระบุ [ความรู้ทั่วไป] ไว้หน้าข้อความนั้น\n"
+            "- ห้ามแต่งหรือสร้างข้อมูล สถิติ ชื่อผู้วิจัย หรือการอ้างอิงที่ไม่ปรากฏในเอกสาร\n"
+            "- ห้ามใส่การอ้างอิง (citation) ที่ไม่มีในเอกสารที่ให้มา\n"
+            "- เขียนให้ครอบคลุมเนื้อหาสำคัญจากเอกสารที่ให้มา\n"
+        )
+    else:
+        grounding_rules = (
+            "- ไม่พบเอกสารที่เกี่ยวข้องกับหัวข้อนี้ในฐานข้อมูล\n"
+            "- ให้เริ่มต้นเนื้อหาด้วยคำเตือนนี้: "
+            "\"[คำเตือน: ไม่พบเอกสารอ้างอิงที่เกี่ยวข้อง เนื้อหาต่อไปนี้อาศัยความรู้ทั่วไปของ AI]\"\n"
+            "- ทุกย่อหน้าต้องมีป้ายกำกับ [ความรู้ทั่วไป] นำหน้า\n"
+            "- ห้ามแต่งข้อมูล สถิติ หรือการอ้างอิงที่ไม่มีหลักฐาน\n"
+        )
+
+    system_prompt = (
+        "คุณเป็นนักเขียนวิชาการที่เน้นความถูกต้องและการอ้างอิงแหล่งที่มา เขียนเนื้อหาทีละ section\n"
+        "ภาษา: เขียนภาษาไทย ยกเว้นเอกสารที่ให้มาเป็นภาษาอังกฤษ ให้เขียนภาษาอังกฤษได้ "
+        "— technical terms ใช้อังกฤษได้เสมอ\n\n"
+        "กฎการเขียน:\n"
+        "- เขียนเฉพาะส่วนที่ได้รับมอบหมาย ห้ามเขียนส่วนอื่นหรือซ้ำกับเนื้อหาเดิม\n"
+        "- ความยาวขั้นต่ำ 400 คำ, ≥4 ย่อหน้า — ขยายความละเอียดจากเอกสารที่ให้มา\n"
+        "- ตอบเป็น plain text เท่านั้น ห้าม JSON ห้ามคำอธิบายเพิ่ม\n"
+        + grounding_rules +
+        "\nก่อนส่งผลลัพธ์ ให้ตรวจสอบภายในดังนี้ (ไม่ต้องแสดงในผลลัพธ์):\n"
+        "1. ข้อเท็จจริงทุกข้อ (ตัวเลข สถิติ ชื่อผู้วิจัย) มาจากเอกสารที่ให้มา — ถ้าไม่มีหลักฐาน ให้ใช้ [ความรู้ทั่วไป] หรือลบออก\n"
+        "2. เนื้อหาตรงตามส่วนที่ได้รับมอบหมายเท่านั้น\n"
+        "3. ไม่สร้างการอ้างอิง ชื่อผู้แต่ง หรือปีพิมพ์ที่ไม่ปรากฏในเอกสาร"
+    )
+
+    user_parts = [f"หัวข้อเอกสาร: {topic}", f"ส่วนที่ต้องเขียน: {section_instruction}"]
+    if context_text:
+        user_parts.append(f"=== เนื้อหาจากเอกสารที่เลือก (ใช้เป็นฐานข้อมูลหลัก) ===\n{context_text}")
+    if existing_tail:
+        user_parts.append(f"=== เนื้อหาที่เขียนไปแล้ว (ส่วนท้าย — ห้ามซ้ำ) ===\n{existing_tail}")
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+    yield from _call_api_stream(messages, api_key, max_tokens=4096, temperature=0.45)
+
+
 def generate_selection_edit(selected_text, instruction, retrieved_docs=None):
     """
     Edit a selected piece of text according to user instruction.
