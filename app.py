@@ -449,6 +449,9 @@ def main():
         "review_retrieved_docs": None,
         "section_retrieved_docs": None,
         "section_doc_result": None,
+        "section_llm_result": None,
+        "section_llm_think": "",
+        "section_llm_docs": [],
         "compare_result": None,
         "compare_expanded": True,
         "compare_retrieved_docs": None,
@@ -1351,30 +1354,14 @@ def main():
                                 existing_content=work_content,
                             )
 
-                            separator = "\n\n" if work_content.strip() else ""
-                            new_content = work_content + separator + section_text
-
-                            st.session_state.ai_edit_undo_stack.append(work_content)
-                            if len(st.session_state.ai_edit_undo_stack) > 20:
-                                st.session_state.ai_edit_undo_stack.pop(0)
-                            st.session_state.ai_edit_redo_stack = []
-                            st.session_state["_pending_work_content"] = new_content
-                            st.session_state.work_content_val = new_content
+                            st.session_state.section_llm_result = section_text
+                            st.session_state.section_llm_think = sec_think or ""
+                            st.session_state.section_llm_docs = retrieved
 
                             st.session_state.total_tokens += ri + ro
                             st.session_state.input_tokens += ri
                             st.session_state.output_tokens += ro
                             database.record_token_usage(user_id, ri, ro, "generate_section")
-
-                            _sec_msg = f"📝 เขียนส่วน \"{final_instruction[:60]}\" เสร็จแล้ว — ต่อท้ายใน editor"
-                            if sec_think:
-                                _sec_msg = f"<think>{sec_think}</think>\n\n{_sec_msg}"
-                            st.session_state.messages.append({
-                                "role": "assistant",
-                                "content": _sec_msg,
-                                "tokens": ri + ro,
-                                "action": "edit",
-                            })
                             st.rerun()
                         except ValueError as e:
                             st.error(f"❌ API Error: {str(e)}")
@@ -1434,14 +1421,42 @@ def main():
         # ── Document-mode output display ──────────────────────────────────────
         if st.session_state.get("section_doc_result"):
             _sdoc_think, _sdoc_body = parse_think_content(st.session_state.section_doc_result)
-            if _sdoc_think:
-                with st.expander("💭 ความคิด (Thinking)", expanded=False):
-                    st.markdown(_sdoc_think)
             with st.expander("📄 เนื้อหาที่สร้างจากเอกสาร", expanded=True):
                 st.markdown(_sdoc_body)
-            _sc1, _sc2 = st.columns(2)
-            with _sc1:
-                if st.button("📋 ส่งไปยัง Editor", key="sec_send_to_editor_btn", use_container_width=True):
+                if _sdoc_think:
+                    with st.expander("💭 ความคิด (Thinking)", expanded=False):
+                        st.markdown(
+                            f'<div class="think-block">{_sdoc_think}</div>',
+                            unsafe_allow_html=True,
+                        )
+                _sdoc_docs = st.session_state.get("section_retrieved_docs")
+                if _sdoc_docs is not None:
+                    _sdoc_ref_label = f"📚 เอกสารอ้างอิงที่ใช้ — {len(_sdoc_docs)} รายการ" if _sdoc_docs else "📚 เอกสารอ้างอิงที่ใช้ — ไม่พบเอกสาร"
+                    with st.expander(_sdoc_ref_label, expanded=False):
+                        if _sdoc_docs:
+                            for i, doc in enumerate(_sdoc_docs, 1):
+                                src_type = doc.metadata.get("source_type", doc.metadata.get("source", "doc"))
+                                label = "📝 Note" if src_type in ("note", "research_note") else f"📄 Doc {i}"
+                                st.markdown(f"**{label}:** {doc.metadata.get('paper_title', doc.metadata.get('filename', ''))}")
+                                preview = doc.page_content
+                                st.text(preview[:300] + "..." if len(preview) > 300 else preview)
+                        else:
+                            st.caption("ไม่พบเอกสารอ้างอิงที่เกี่ยวข้องใน Vector Database — ใช้ความรู้ทั่วไปของ AI")
+            _sdb1, _sdb2, _sdb3 = st.columns(3)
+            with _sdb1:
+                if st.button("📥 Replace Content in Editor", key="sec_doc_replace_btn", use_container_width=True):
+                    _cur = st.session_state.get("work_content_val", "")
+                    st.session_state.ai_edit_undo_stack.append(_cur)
+                    if len(st.session_state.ai_edit_undo_stack) > 20:
+                        st.session_state.ai_edit_undo_stack.pop(0)
+                    st.session_state.ai_edit_redo_stack = []
+                    st.session_state["_pending_work_content"] = _sdoc_body
+                    st.session_state.work_content_val = _sdoc_body
+                    st.session_state.section_doc_result = None
+                    st.session_state.section_retrieved_docs = None
+                    st.rerun()
+            with _sdb2:
+                if st.button("➕ Append Content in Editor", key="sec_doc_append_btn", use_container_width=True):
                     _cur = st.session_state.get("work_content_val", "")
                     _sep = "\n\n" if _cur.strip() else ""
                     _new = _cur + _sep + _sdoc_body
@@ -1452,25 +1467,68 @@ def main():
                     st.session_state["_pending_work_content"] = _new
                     st.session_state.work_content_val = _new
                     st.session_state.section_doc_result = None
+                    st.session_state.section_retrieved_docs = None
                     st.rerun()
-            with _sc2:
-                if st.button("🗑️ ล้างผล", key="sec_clear_result_btn", use_container_width=True):
+            with _sdb3:
+                if st.button("❌ Cancel", key="sec_doc_cancel_btn", use_container_width=True):
                     st.session_state.section_doc_result = None
+                    st.session_state.section_retrieved_docs = None
                     st.rerun()
 
-        _sec_docs = st.session_state.get("section_retrieved_docs")
-        if _sec_docs is not None:
-            _sec_label = f"📚 เอกสารอ้างอิงที่ใช้ (สร้างเนื้อหา) — {len(_sec_docs)} รายการ" if _sec_docs else "📚 เอกสารอ้างอิงที่ใช้ (สร้างเนื้อหา) — ไม่พบเอกสาร"
-            with st.expander(_sec_label, expanded=False):
-                if _sec_docs:
-                    for i, doc in enumerate(_sec_docs, 1):
-                        src_type = doc.metadata.get("source_type", doc.metadata.get("source", "doc"))
-                        label = "📝 Note" if src_type in ("note", "research_note") else f"📄 Doc {i}"
-                        st.markdown(f"**{label}:** {doc.metadata.get('paper_title', doc.metadata.get('filename', ''))}")
-                        preview = doc.page_content
-                        st.text(preview[:300] + "..." if len(preview) > 300 else preview)
-                else:
-                    st.caption("ไม่พบเอกสารอ้างอิงที่เกี่ยวข้องใน Vector Database — ใช้ความรู้ทั่วไปของ AI")
+        # ── LLM-mode output display ────────────────────────────────────────────
+        if st.session_state.get("section_llm_result"):
+            _sllm_body = st.session_state.section_llm_result
+            _sllm_think = st.session_state.get("section_llm_think", "")
+            _sllm_docs = st.session_state.get("section_llm_docs", [])
+            with st.expander("📝 เนื้อหาที่สร้าง", expanded=True):
+                st.markdown(_sllm_body)
+                if _sllm_think:
+                    with st.expander("💭 ความคิด (Thinking)", expanded=False):
+                        st.markdown(
+                            f'<div class="think-block">{_sllm_think}</div>',
+                            unsafe_allow_html=True,
+                        )
+                if _sllm_docs is not None:
+                    _sllm_ref_label = f"📚 เอกสารอ้างอิงที่ใช้ — {len(_sllm_docs)} รายการ" if _sllm_docs else "📚 เอกสารอ้างอิงที่ใช้ — ไม่พบเอกสาร"
+                    with st.expander(_sllm_ref_label, expanded=False):
+                        if _sllm_docs:
+                            for i, doc in enumerate(_sllm_docs, 1):
+                                src_type = doc.metadata.get("source_type", doc.metadata.get("source", "doc"))
+                                label = "📝 Note" if src_type in ("note", "research_note") else f"📄 Doc {i}"
+                                st.markdown(f"**{label}:** {doc.metadata.get('paper_title', doc.metadata.get('filename', ''))}")
+                                preview = doc.page_content
+                                st.text(preview[:300] + "..." if len(preview) > 300 else preview)
+                        else:
+                            st.caption("ไม่พบเอกสารอ้างอิงที่เกี่ยวข้องใน Vector Database — ใช้ความรู้ทั่วไปของ AI")
+            _slb1, _slb2, _slb3 = st.columns(3)
+            with _slb1:
+                if st.button("📥 Replace Content in Editor", key="sec_llm_replace_btn", use_container_width=True):
+                    _cur = st.session_state.get("work_content_val", "")
+                    st.session_state.ai_edit_undo_stack.append(_cur)
+                    if len(st.session_state.ai_edit_undo_stack) > 20:
+                        st.session_state.ai_edit_undo_stack.pop(0)
+                    st.session_state.ai_edit_redo_stack = []
+                    st.session_state["_pending_work_content"] = _sllm_body
+                    st.session_state.work_content_val = _sllm_body
+                    st.session_state.section_llm_result = None
+                    st.rerun()
+            with _slb2:
+                if st.button("➕ Append Content in Editor", key="sec_llm_append_btn", use_container_width=True):
+                    _cur = st.session_state.get("work_content_val", "")
+                    _sep = "\n\n" if _cur.strip() else ""
+                    _new = _cur + _sep + _sllm_body
+                    st.session_state.ai_edit_undo_stack.append(_cur)
+                    if len(st.session_state.ai_edit_undo_stack) > 20:
+                        st.session_state.ai_edit_undo_stack.pop(0)
+                    st.session_state.ai_edit_redo_stack = []
+                    st.session_state["_pending_work_content"] = _new
+                    st.session_state.work_content_val = _new
+                    st.session_state.section_llm_result = None
+                    st.rerun()
+            with _slb3:
+                if st.button("❌ Cancel", key="sec_llm_cancel_btn", use_container_width=True):
+                    st.session_state.section_llm_result = None
+                    st.rerun()
 
         # ── Advisor Review Section ────────────────────────────────────────
         with st.expander("🎓 ตรวจงานโดย AI", expanded=False):
